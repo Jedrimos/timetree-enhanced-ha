@@ -63,6 +63,7 @@ async def async_setup_entry(
                 member_label=member["label_name"],
                 color=color,
                 tz=tz,
+                label_id=member.get("label_id"),
             )
         )
         _LOGGER.debug(
@@ -179,6 +180,7 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
         summary: str = kwargs.get("summary", "")
         description: str = kwargs.get("description", "") or ""
         location: str = kwargs.get("location", "") or ""
+        label_id: int | None = kwargs.get("label_id")
 
         all_day = isinstance(dtstart, date) and not isinstance(dtstart, datetime)
         if not all_day:
@@ -199,6 +201,7 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
                 all_day=all_day,
                 description=description,
                 location=location,
+                label_id=label_id,
             )
             _LOGGER.debug("TimeTree Enhanced: event created – '%s'", summary)
         except TimeTreeAPIError as err:
@@ -230,11 +233,13 @@ class TimeTreeMemberCalendar(TimeTreeBaseCalendar):
         member_label: str,
         color: str,
         tz: str,
+        label_id: int | None = None,
     ) -> None:
         super().__init__(coordinator, api, calendar_id, calendar_name, tz)
         self._member_name = member_name
         self._member_label = member_label
         self._color = color
+        self._label_id = label_id
         self._attr_name = f"{calendar_name} – {member_name}"
         self._attr_unique_id = (
             f"{DOMAIN}_{calendar_id}_member_{member_name.lower().replace(' ', '_')}"
@@ -249,6 +254,10 @@ class TimeTreeMemberCalendar(TimeTreeBaseCalendar):
         base["member"] = self._member_name
         base["color_hint"] = self._color
         return base
+
+    async def async_create_event(self, **kwargs: Any) -> None:
+        kwargs.setdefault("label_id", self._label_id)
+        await super().async_create_event(**kwargs)
 
 
 def _raw_to_calendar_event(event: dict, display_title: str) -> CalendarEvent | None:
