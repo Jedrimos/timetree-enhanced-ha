@@ -35,6 +35,13 @@ class TimeTreeAPI:
         self._session = session
         self._session_id: str | None = None
 
+    @property
+    def is_authenticated(self) -> bool:
+        return self._session_id is not None
+
+    def invalidate_session(self) -> None:
+        self._session_id = None
+
     async def login(self, email: str, password: str) -> None:
         """Obtain a session_id. Raises TimeTreeAuthError on failure."""
         device_uuid = uuid.uuid4().hex

@@ -49,18 +49,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Mutable container so _fetch() can write the timestamp and sensors can read it
     last_sync: dict[str, datetime | None] = {"time": None}
+    # Set to False once the range endpoint returns a permanent error (404)
+    state: dict[str, bool] = {"use_range_endpoint": True}
 
-    async def _fetch() -> list[dict]:
-        """Login + fetch all upcoming events including recurring ones."""
-        try:
-            await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+    async def _get_events() -> list[dict]:
+        """Fetch events – tries range endpoint first, falls back to upcoming_events."""
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=14)
+        end = now + timedelta(days=fetch_days)
 
-            now = datetime.now(timezone.utc)
-            # 14 days back to catch ongoing multi-day events, fetch_days forward
-            start = now - timedelta(days=14)
-            end = now + timedelta(days=fetch_days)
-
-            # Range endpoint includes recurring events (birthdays, anniversaries)
+        if state["use_range_endpoint"]:
             try:
                 events = await api.get_events_in_range(calendar_id, start, end, tz=tz)
                 _LOGGER.debug(
@@ -71,20 +69,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 last_sync["time"] = datetime.now(timezone.utc)
                 return events
             except TimeTreeAPIError as range_err:
-                _LOGGER.warning(
-                    "TimeTree Enhanced: range endpoint failed (%s), falling back to upcoming_events",
-                    range_err,
-                )
+                err_str = str(range_err)
+                if "HTTP 404" in err_str:
+                    _LOGGER.warning(
+                        "TimeTree Enhanced: range endpoint not available (%s), "
+                        "using upcoming_events permanently",
+                        range_err,
+                    )
+                    state["use_range_endpoint"] = False
+                else:
+                    _LOGGER.warning(
+                        "TimeTree Enhanced: range endpoint failed (%s), falling back to upcoming_events",
+                        range_err,
+                    )
 
-            # Fallback: upcoming_events (no recurring)
-            events = await api.get_upcoming_events(calendar_id, days=fetch_days, tz=tz)
-            _LOGGER.debug(
-                "TimeTree Enhanced: %d events via upcoming_events for %s",
-                len(events),
-                calendar_id,
-            )
-            last_sync["time"] = datetime.now(timezone.utc)
-            return events
+        events = await api.get_upcoming_events(calendar_id, days=fetch_days, tz=tz)
+        _LOGGER.debug(
+            "TimeTree Enhanced: %d events via upcoming_events for %s",
+            len(events),
+            calendar_id,
+        )
+        last_sync["time"] = datetime.now(timezone.utc)
+        return events
+
+    async def _fetch() -> list[dict]:
+        """Fetch events, logging in only when the session is missing or expired."""
+        try:
+            if not api.is_authenticated:
+                await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+
+            try:
+                return await _get_events()
+            except TimeTreeAuthError:
+                # Session expired – re-login once and retry
+                _LOGGER.debug("TimeTree Enhanced: session expired, re-logging in")
+                api.invalidate_session()
+                await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+                return await _get_events()
 
         except TimeTreeAuthError as err:
             raise UpdateFailed(f"Auth-Fehler: {err}") from err
