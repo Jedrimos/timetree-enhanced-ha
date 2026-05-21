@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import TimeTreeAPI, TimeTreeAPIError, TimeTreeAuthError
@@ -47,6 +48,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     calendar_id: str = entry.data[CONF_CALENDAR_ID]
 
+    # Persist session_id across HA restarts to avoid login rate-limiting (HTTP 429)
+    store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_session")
+    stored = await store.async_load() or {}
+    if stored.get("session_id"):
+        api._session_id = stored["session_id"]
+        _LOGGER.debug("TimeTree Enhanced: restored session_id from storage")
+
     # Mutable container so _fetch() can write the timestamp and sensors can read it
     last_sync: dict[str, datetime | None] = {"time": None}
 
@@ -83,11 +91,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         last_sync["time"] = datetime.now(timezone.utc)
         return events
 
+    async def _login_and_save() -> None:
+        """Login and persist the new session_id."""
+        await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+        await store.async_save({"session_id": api._session_id})
+
     async def _fetch() -> list[dict]:
         """Fetch events, logging in only when the session is missing or expired."""
         try:
             if not api.is_authenticated:
-                await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+                await _login_and_save()
 
             try:
                 return await _get_events()
@@ -95,7 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Session expired – re-login once and retry
                 _LOGGER.debug("TimeTree Enhanced: session expired, re-logging in")
                 api.invalidate_session()
-                await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+                await _login_and_save()
                 return await _get_events()
 
         except TimeTreeAuthError as err:
@@ -133,6 +146,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
+        # Keep stored session_id so the next load can reuse it without re-login
     return unload_ok
 
 
