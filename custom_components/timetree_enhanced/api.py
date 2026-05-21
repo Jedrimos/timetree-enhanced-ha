@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,10 +14,9 @@ _LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://timetreeapp.com/api/v1"
 
 HEADERS_BASE = {
-    "User-Agent": "TimeTree/7.21.1 (iPhone; iOS 17.5; Scale/3.00)",
     "Accept": "application/json",
     "Content-Type": "application/json",
-    "X-Requested-With": "XMLHttpRequest",
+    "X-Timetreea": "web/2.1.0/en",
 }
 
 
@@ -37,10 +37,11 @@ class TimeTreeAPI:
 
     async def login(self, email: str, password: str) -> None:
         """Obtain a session_id. Raises TimeTreeAuthError on failure."""
+        device_uuid = uuid.uuid4().hex
         try:
-            resp = await self._session.post(
-                f"{BASE_URL}/auth/sign_in",
-                json={"email": email, "password": password},
+            resp = await self._session.put(
+                f"{BASE_URL}/auth/email/signin",
+                json={"uid": email, "password": password, "uuid": device_uuid},
                 headers=HEADERS_BASE,
                 allow_redirects=True,
             )
@@ -62,24 +63,23 @@ class TimeTreeAPI:
                 f"Login returned HTTP {resp.status}: {body[:200]}"
             )
 
-        try:
-            data = json.loads(body)
-        except Exception as err:
-            _LOGGER.error(
-                "TimeTree Enhanced: login response not valid JSON – body: %.500s", body
-            )
-            raise TimeTreeAPIError(f"Login response not valid JSON: {err}") from err
+        # Session ID comes as a cookie
+        self._session_id = resp.cookies.get("_session_id")
+        if not self._session_id:
+            # Fall back to JSON body for older server versions
+            try:
+                data = json.loads(body)
+                self._session_id = (
+                    data.get("session_id")
+                    or (data.get("user") or {}).get("session_id")
+                    or (data.get("data") or {}).get("session_id")
+                )
+            except Exception:
+                pass
 
-        # session_id may be top-level or nested under "user" / "data"
-        self._session_id = (
-            data.get("session_id")
-            or (data.get("user") or {}).get("session_id")
-            or (data.get("data") or {}).get("session_id")
-        )
         if not self._session_id:
             _LOGGER.error(
-                "TimeTree Enhanced: no session_id found – response keys: %s – body: %.500s",
-                list(data.keys()), body,
+                "TimeTree Enhanced: no session_id found in cookies or body – body: %.500s", body
             )
             raise TimeTreeAuthError("No session_id in login response")
 
@@ -180,7 +180,7 @@ class TimeTreeAPI:
     def _auth_headers(self) -> dict[str, str]:
         if not self._session_id:
             raise TimeTreeAuthError("Not logged in – call login() first")
-        return {**HEADERS_BASE, "Session-Id": self._session_id}
+        return {**HEADERS_BASE, "Cookie": f"_session_id={self._session_id}"}
 
     async def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         try:
