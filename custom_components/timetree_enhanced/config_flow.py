@@ -76,14 +76,6 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 await api.login(email, password)
                 calendars = await api.get_calendars()
-            except TimeTreeAuthError:
-                errors["base"] = "invalid_auth"
-            except TimeTreeAPIError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Unexpected error during TimeTree login")
-                errors["base"] = "unknown"
-            else:
                 if not calendars:
                     errors["base"] = "no_calendars"
                 else:
@@ -91,6 +83,15 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._password = password
                     self._calendars = calendars
                     return await self.async_step_calendar()
+            except TimeTreeAuthError as err:
+                _LOGGER.warning("TimeTree Enhanced: auth error – %s", err)
+                errors["base"] = "invalid_auth"
+            except TimeTreeAPIError as err:
+                _LOGGER.warning("TimeTree Enhanced: API error – %s", err)
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("TimeTree Enhanced: unexpected error during setup")
+                errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="user",
