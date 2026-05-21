@@ -4,14 +4,15 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from yarl import URL
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import TimeTreeAPI, TimeTreeAPIError, TimeTreeAuthError
+from .api import BASE_URL, TimeTreeAPI, TimeTreeAPIError, TimeTreeAuthError
 from .const import (
     CONF_CALENDAR_ID,
     CONF_EMAIL,
@@ -34,8 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up TimeTree Enhanced from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    session = async_get_clientsession(hass)
-    api = TimeTreeAPI(session)
+    api = TimeTreeAPI()
 
     scan_interval: int = entry.options.get(
         CONF_SCAN_INTERVAL,
@@ -48,40 +48,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     calendar_id: str = entry.data[CONF_CALENDAR_ID]
 
-    # Persist session_id across HA restarts to avoid login rate-limiting (HTTP 429)
+    # Persist session cookie across HA restarts to avoid login rate-limiting (HTTP 429)
     store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_session")
     stored = await store.async_load() or {}
     if stored.get("session_id"):
-        api._session_id = stored["session_id"]
-        _LOGGER.debug("TimeTree Enhanced: restored session_id from storage")
+        api._session.cookie_jar.update_cookies(
+            {"_session_id": stored["session_id"]},
+            response_url=URL(BASE_URL),
+        )
+        _LOGGER.debug("TimeTree Enhanced: restored session cookie from storage")
 
     # Mutable container so _fetch() can write the timestamp and sensors can read it
     last_sync: dict[str, datetime | None] = {"time": None}
 
+    async def _save_session() -> None:
+        """Persist the current session cookie to storage."""
+        cookies = api._session.cookie_jar.filter_cookies(URL(BASE_URL))
+        cookie = cookies.get("_session_id")
+        if cookie:
+            await store.async_save({"session_id": cookie.value})
+
     async def _get_events() -> list[dict]:
-        """Fetch events via sync endpoint (incl. recurring), fall back to upcoming_events."""
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=14)
-        end = now + timedelta(days=fetch_days)
-
-        try:
-            all_events = await api.get_all_events_sync(calendar_id)
-            # Filter locally to the desired window
-            events = _filter_events_in_range(all_events, start, end)
-            _LOGGER.debug(
-                "TimeTree Enhanced: %d/%d events via sync endpoint for %s",
-                len(events),
-                len(all_events),
-                calendar_id,
-            )
-            last_sync["time"] = datetime.now(timezone.utc)
-            return events
-        except TimeTreeAPIError as sync_err:
-            _LOGGER.warning(
-                "TimeTree Enhanced: sync endpoint failed (%s), falling back to upcoming_events",
-                sync_err,
-            )
-
+        """Fetch upcoming events from TimeTree."""
         events = await api.get_upcoming_events(calendar_id, days=fetch_days, tz=tz)
         _LOGGER.debug(
             "TimeTree Enhanced: %d events via upcoming_events for %s",
@@ -92,9 +80,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return events
 
     async def _login_and_save() -> None:
-        """Login and persist the new session_id."""
+        """Login and persist the new session cookie."""
         await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
-        await store.async_save({"session_id": api._session_id})
+        await _save_session()
 
     async def _fetch() -> list[dict]:
         """Fetch events, logging in only when the session is missing or expired."""
@@ -130,7 +118,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     # Fetch the actual persons who are members of this shared calendar.
-    # These become the basis for per-person calendar entities (not event labels).
+    # These become the basis for per-person calendar entities.
     members: list[dict] = []
     try:
         members = await api.get_calendar_members(calendar_id)
@@ -166,8 +154,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
-        # Keep stored session_id so the next load can reuse it without re-login
+        data = hass.data[DOMAIN].pop(entry.entry_id)
+        await data["api"].close()
+        # Keep stored session cookie so the next load can reuse it without re-login
     return unload_ok
 
 
@@ -176,36 +165,42 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-_CATEGORY_LABEL_KEYWORDS = {
-    "geburtstag", "birthday", "urlaub", "vacation", "feiertag", "holiday",
-    "arbeit", "work", "job", "bank", "schule", "school", "arzt", "doctor",
-    "sport", "einkauf", "shopping", "termin", "appointment",
-    "ebay", "amazon", "müll", "garbage", "sonstiges", "sonstige", "misc",
-}
-
-
 def _members_from_event_labels(events: list[dict]) -> list[dict]:
-    """Derive a member list from the unique label names seen in events.
+    """Derive a member list from labels on UPCOMING events only.
 
-    Skips labels that look like categories (known keywords) rather than
-    person names. Each returned dict has 'name', 'label_name', 'color'.
+    Only labels that appear on at least one future event are included.
+    This ensures we don't create empty calendars for labels that only
+    had past events.  Each returned dict has 'name', 'label_name', 'color'.
     """
+    now_ts = datetime.now(timezone.utc).timestamp()
     seen: dict[str, dict] = {}
+
     for ev in events:
+        # Only consider events that start in the future
+        start_raw = ev.get("start_at") or ev.get("dt_start")
+        if start_raw is None:
+            continue
+        try:
+            if isinstance(start_raw, (int, float)):
+                ev_start_ts = float(start_raw)
+            else:
+                val = str(start_raw).replace("Z", "+00:00")
+                ev_start_ts = datetime.fromisoformat(val).timestamp()
+            if ev_start_ts < now_ts:
+                continue
+        except Exception:
+            continue
+
         label = ev.get("label") or {}
         if not isinstance(label, dict):
             continue
         name = (label.get("name") or "").strip()
         if not name:
             continue
-        if name.lower() in _CATEGORY_LABEL_KEYWORDS:
-            continue
-        # Skip labels with spaces that look like sentences (category phrases)
-        if len(name.split()) > 2:
-            continue
         if name not in seen:
             color = (label.get("color") or label.get("color_name") or "").strip()
             seen[name] = {"name": name, "label_name": name, "color": color}
+
     return sorted(seen.values(), key=lambda m: m["name"])
 
 
@@ -234,7 +229,8 @@ def _filter_events_in_range(
 def _parse_dt(value: str | int | float) -> datetime:
     """Parse ISO datetime string or Unix timestamp to a UTC-aware datetime."""
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=timezone.utc)
+        secs = value / 1000 if value > 1e10 else value
+        return datetime.fromtimestamp(secs, tz=timezone.utc)
     value = str(value)
     if len(value) == 10 and "T" not in value:
         return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
