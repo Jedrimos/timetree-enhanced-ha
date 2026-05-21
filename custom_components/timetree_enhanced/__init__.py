@@ -214,15 +214,18 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 def _expand_event(ev: dict, window_start: datetime, window_end: datetime) -> list[dict]:
-    """Return a list of event dicts for the given window.
+    """Return occurrences of ev that fall inside [window_start, window_end].
 
-    Non-recurring events are returned as-is (single item list).
-    Recurring events are expanded: for each supported frequency (DAILY, WEEKLY,
-    MONTHLY, YEARLY) we generate all occurrences that fall inside [window_start,
-    window_end].  Unknown/unparseable recurrence rules fall back to returning the
-    raw event unchanged so the caller can still filter it by date.
+    Non-recurring events return [ev].  Recurring events are expanded using a
+    minimal RRULE parser that handles FREQ, INTERVAL, UNTIL, and COUNT so that
+    finished series (with UNTIL= or COUNT=) are not resurrected in the future.
+    Unknown FREQ values fall back to returning the raw event unchanged.
     """
     import re as _re
+
+    # Skip deleted/cancelled events
+    if ev.get("deleted_at") or ev.get("cancelled"):
+        return []
 
     _rrule_val = ev.get("recurrences") or ev.get("recurrence") or ev.get("rrule") or ""
     if isinstance(_rrule_val, list):
@@ -244,98 +247,110 @@ def _expand_event(ev: dict, window_start: datetime, window_end: datetime) -> lis
     except Exception:
         return [ev]
 
-    # Parse FREQ from RRULE string (e.g. "RRULE:FREQ=YEARLY;BYDAY=...")
     freq_match = _re.search(r"FREQ=(\w+)", rrule_raw, _re.IGNORECASE)
     if not freq_match:
         return [ev]
     freq = freq_match.group(1).upper()
 
-    # Build candidate occurrences covering the window
-    candidates: list[datetime] = []
-    cursor = base_start
+    interval_match = _re.search(r"INTERVAL=(\d+)", rrule_raw, _re.IGNORECASE)
+    interval = int(interval_match.group(1)) if interval_match else 1
 
-    # How far back we need to go to catch long-duration or edge events
-    look_back = timedelta(days=1)
-
-    if freq == "YEARLY":
-        # Align to first occurrence >= window_start - look_back
-        target = window_start - look_back
-        while cursor < target:
-            try:
-                cursor = cursor.replace(year=cursor.year + 1)
-            except ValueError:
-                break
-        # Also check the year before in case we overshot
+    # UNTIL= → hard end date for the series
+    until_dt: datetime | None = None
+    until_match = _re.search(r"UNTIL=(\d{8}T\d{6}Z?|\d{8})", rrule_raw, _re.IGNORECASE)
+    if until_match:
+        us = until_match.group(1)
         try:
-            prev = cursor.replace(year=cursor.year - 1)
-            if prev >= target:
-                candidates.append(prev)
+            if "T" in us:
+                until_dt = datetime.strptime(us.rstrip("Z"), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+            else:
+                until_dt = datetime.strptime(us, "%Y%m%d").replace(tzinfo=timezone.utc)
         except ValueError:
             pass
-        while cursor <= window_end:
-            candidates.append(cursor)
-            try:
-                cursor = cursor.replace(year=cursor.year + 1)
-            except ValueError:
-                break
 
-    elif freq == "MONTHLY":
-        target = window_start - look_back
-        while cursor < target:
-            year, month = cursor.year, cursor.month + 1
-            if month > 12:
-                year, month = year + 1, 1
-            try:
-                cursor = cursor.replace(year=year, month=month)
-            except ValueError:
-                break
-        while cursor <= window_end:
-            candidates.append(cursor)
-            year, month = cursor.year, cursor.month + 1
-            if month > 12:
-                year, month = year + 1, 1
-            try:
-                cursor = cursor.replace(year=year, month=month)
-            except ValueError:
-                break
+    # Early exit: series ended before the window starts
+    if until_dt and until_dt < window_start:
+        return []
 
-    elif freq == "WEEKLY":
-        target = window_start - look_back
-        while cursor < target:
-            cursor += timedelta(weeks=1)
-        while cursor <= window_end:
-            candidates.append(cursor)
-            cursor += timedelta(weeks=1)
+    # COUNT= → series has a fixed number of occurrences total
+    count_match = _re.search(r"COUNT=(\d+)", rrule_raw, _re.IGNORECASE)
+    max_count = int(count_match.group(1)) if count_match else None
 
-    elif freq == "DAILY":
-        target = window_start - look_back
-        while cursor < target:
-            cursor += timedelta(days=1)
-        while cursor <= window_end:
-            candidates.append(cursor)
-            cursor += timedelta(days=1)
+    def _advance(cur: datetime, n: int = 1) -> datetime:
+        """Advance cursor by n steps according to FREQ/INTERVAL."""
+        steps = n * interval
+        if freq == "YEARLY":
+            return cur.replace(year=cur.year + steps)
+        if freq == "MONTHLY":
+            m = cur.month - 1 + steps
+            return cur.replace(year=cur.year + m // 12, month=m % 12 + 1)
+        if freq == "WEEKLY":
+            return cur + timedelta(weeks=steps)
+        if freq == "DAILY":
+            return cur + timedelta(days=steps)
+        raise ValueError(f"Unsupported FREQ: {freq}")
 
-    else:
+    if freq not in ("YEARLY", "MONTHLY", "WEEKLY", "DAILY"):
         return [ev]
 
-    if not candidates:
-        return [ev]
+    # --- Skip-ahead optimisation ---
+    # Jump cursor forward so we don't iterate through years of past occurrences.
+    # We also track occurrence_count for COUNT= support.
+    cursor = base_start
+    occurrence_count = 0
 
-    result = []
-    for occ_start in candidates:
-        occ_end = occ_start + duration
-        if occ_end < window_start or occ_start > window_end:
-            continue
-        # Determine correct timestamp format (ms or ISO string) to match original
-        if isinstance(start_raw, (int, float)):
-            new_start: int | str = int(occ_start.timestamp() * 1000)
-            new_end: int | str = int(occ_end.timestamp() * 1000)
-        else:
-            new_start = occ_start.isoformat()
-            new_end = occ_end.isoformat()
-        result.append({**ev, "start_at": new_start, "end_at": new_end})
+    try:
+        if freq == "YEARLY":
+            skip = max(0, window_start.year - base_start.year - 1) // interval * interval
+        elif freq == "MONTHLY":
+            delta_m = (window_start.year - base_start.year) * 12 + window_start.month - base_start.month
+            skip = max(0, delta_m - 1) // interval * interval
+        elif freq == "WEEKLY":
+            delta_w = max(0, (window_start - base_start).days // 7 - 1)
+            skip = delta_w // interval * interval
+        else:  # DAILY
+            delta_d = max(0, (window_start - base_start).days - 1)
+            skip = delta_d // interval * interval
 
-    return result if result else [ev]
+        if skip > 0:
+            cursor = _advance(cursor, skip)
+            occurrence_count = skip
+
+    except (ValueError, OverflowError):
+        pass
+
+    # --- Generate occurrences in/near window ---
+    result: list[dict] = []
+    max_iter = 500  # safety cap
+
+    for _ in range(max_iter):
+        if cursor > window_end:
+            break
+        if until_dt and cursor > until_dt:
+            break
+        occurrence_count += 1
+        if max_count is not None and occurrence_count > max_count:
+            break
+
+        occ_end = cursor + duration
+        if occ_end >= window_start:  # overlaps the window
+            if isinstance(start_raw, (int, float)):
+                new_start: int | str = int(cursor.timestamp() * 1000)
+                new_end: int | str = int(occ_end.timestamp() * 1000)
+            else:
+                new_start = cursor.isoformat()
+                new_end = occ_end.isoformat()
+            result.append({**ev, "start_at": new_start, "end_at": new_end})
+
+        try:
+            cursor = _advance(cursor)
+        except (ValueError, OverflowError):
+            break
+
+    # If the series produced no occurrences in the window, return nothing
+    # (don't fall back to the base event which is likely years in the past)
+    return result
+
 
 
 def _members_from_event_labels(events: list[dict]) -> list[dict]:
