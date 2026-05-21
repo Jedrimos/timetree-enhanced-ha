@@ -1,11 +1,12 @@
 """Calendar platform for TimeTree Enhanced.
 
 Creates:
-  • One "Alle" entity  →  every event from the calendar
-  • One entity per detected member  →  only that member's events
+  • One "Alle" entity        → every event from the calendar
+  • One entity per calendar member → only events whose label matches the member
 
-New members discovered on later coordinator refreshes automatically
-get their own entity (no restart required).
+Calendar members (people with email access) are fetched from the API on setup.
+Events are assigned to members by matching event.label.name to the member's
+label name (which is typically the member's own name in TimeTree).
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from typing import Any
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
@@ -26,12 +27,6 @@ from .const import (
     DEFAULT_TIMEZONE,
     DOMAIN,
     MEMBER_COLORS,
-    NO_MEMBER,
-)
-from .helpers import (
-    event_to_calendar_event,
-    extract_unique_members,
-    parse_member_and_title,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,63 +37,50 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up calendar entities."""
+    """Set up calendar entities – one per calendar member plus an 'Alle' entity."""
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: DataUpdateCoordinator = data["coordinator"]
     api: TimeTreeAPI = data["api"]
     calendar_id: str = data["calendar_id"]
     calendar_name: str = entry.data.get(CONF_CALENDAR_NAME, "TimeTree")
     tz: str = entry.data.get(CONF_TIMEZONE, DEFAULT_TIMEZONE)
+    members: list[dict] = data.get("members", [])
 
-    known_members: set[str] = set()
-    color_index: dict[str, int] = {}
+    entities: list[CalendarEntity] = [
+        TimeTreeAllCalendar(coordinator, api, calendar_id, calendar_name, tz)
+    ]
 
-    def _add_new_members(events: list[dict]) -> None:
-        new_entities: list[CalendarEntity] = []
-        for member in extract_unique_members(events):
-            if member in known_members:
-                continue
-            known_members.add(member)
-            idx = len(color_index)
-            color_index[member] = idx % len(MEMBER_COLORS)
-            new_entities.append(
-                TimeTreeMemberCalendar(
-                    coordinator=coordinator,
-                    api=api,
-                    calendar_id=calendar_id,
-                    calendar_name=calendar_name,
-                    member_name=member,
-                    color=MEMBER_COLORS[color_index[member]],
-                    tz=tz,
-                )
-            )
-            _LOGGER.info("TimeTree Enhanced: new member calendar created → %s", member)
-
-        if new_entities:
-            async_add_entities(new_entities, True)
-
-    async_add_entities(
-        [
-            TimeTreeAllCalendar(
+    for idx, member in enumerate(members):
+        # Use the color from the TimeTree label; fall back to a rotating palette
+        color = member.get("color") or MEMBER_COLORS[idx % len(MEMBER_COLORS)]
+        entities.append(
+            TimeTreeMemberCalendar(
                 coordinator=coordinator,
                 api=api,
                 calendar_id=calendar_id,
                 calendar_name=calendar_name,
+                member_name=member["name"],
+                member_label=member["label_name"],
+                color=color,
                 tz=tz,
             )
-        ],
-        True,
-    )
+        )
+        _LOGGER.debug(
+            "TimeTree Enhanced: member calendar → %s (label: %s, color: %s)",
+            member["name"],
+            member["label_name"],
+            color,
+        )
 
-    if coordinator.data:
-        _add_new_members(coordinator.data)
+    async_add_entities(entities, True)
 
-    @callback
-    def _on_coordinator_update() -> None:
-        if coordinator.data:
-            _add_new_members(coordinator.data)
 
-    entry.async_on_unload(coordinator.async_add_listener(_on_coordinator_update))
+def _event_label_name(event: dict) -> str:
+    """Return the label name of a raw TimeTree event, or empty string."""
+    label = event.get("label") or {}
+    if isinstance(label, dict):
+        return (label.get("name") or "").strip()
+    return ""
 
 
 class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
@@ -120,12 +102,15 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
         self._calendar_name = calendar_name
         self._tz = tz
 
+    def _event_belongs(self, event: dict) -> bool:
+        """Return True if this event should appear in this calendar."""
+        return True
+
     def _iter_calendar_events(
         self,
         start_date: datetime,
         end_date: datetime,
     ) -> list[CalendarEvent]:
-        # Ensure bounds are timezone-aware (HA calendar card may pass naive datetimes)
         if start_date.tzinfo is None:
             start_date = start_date.replace(tzinfo=timezone.utc)
         if end_date.tzinfo is None:
@@ -133,10 +118,12 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
 
         result: list[CalendarEvent] = []
         for raw in self.coordinator.data or []:
-            member, display_title = parse_member_and_title(raw)
-            if not self._event_belongs(member):
+            if not self._event_belongs(raw):
                 continue
-            cal_event = event_to_calendar_event(raw, display_title)
+            raw_title = (raw.get("title") or "").strip() or "(Kein Titel)"
+            label_name = _event_label_name(raw)
+            display_title = f"{label_name}: {raw_title}" if label_name else raw_title
+            cal_event = _raw_to_calendar_event(raw, display_title)
             if cal_event is None:
                 continue
             event_start = _as_datetime(cal_event.start)
@@ -147,27 +134,20 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
         result.sort(key=lambda e: _as_datetime(e.start))
         return result
 
-    def _event_belongs(self, member: str) -> bool:  # noqa: ARG002
-        return True
-
     @property
     def event(self) -> CalendarEvent | None:
-        """Return the current or next upcoming event."""
         now = datetime.now(tz=timezone.utc)
-        window_end = now + timedelta(days=60)
-        for cal_event in self._iter_calendar_events(now, window_end):
+        for cal_event in self._iter_calendar_events(now, now + timedelta(days=60)):
             if _as_datetime(cal_event.end) > now:
                 return cal_event
         return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose next event time info for dashboard cards."""
         attrs: dict[str, Any] = {}
         ev = self.event
         if ev is None:
             return attrs
-
         if isinstance(ev.start, datetime):
             attrs["next_event_start"] = ev.start.isoformat()
             attrs["next_event_end"] = ev.end.isoformat()
@@ -180,7 +160,6 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
             attrs["next_event_all_day"] = True
             attrs["next_event_time"] = "Ganztags"
             attrs["next_event_date"] = ev.start.strftime("%d.%m.%Y")
-
         attrs["next_event_summary"] = ev.summary
         attrs["next_event_location"] = ev.location or ""
         attrs["next_event_description"] = ev.description or ""
@@ -192,11 +171,9 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
         start_date: datetime,
         end_date: datetime,
     ) -> list[CalendarEvent]:
-        """Return all events in the requested range (used by calendar card)."""
         return self._iter_calendar_events(start_date, end_date)
 
     async def async_create_event(self, **kwargs: Any) -> None:
-        """Create an event in TimeTree."""
         dtstart: datetime | date = kwargs["dtstart"]
         dtend: datetime | date = kwargs["dtend"]
         summary: str = kwargs.get("summary", "")
@@ -213,27 +190,22 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
             dtstart = datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=timezone.utc)
             dtend = datetime(dtend.year, dtend.month, dtend.day, tzinfo=timezone.utc)
 
-        title = self._build_create_title(summary)
-
         try:
             await self._api.create_event(
                 self._calendar_id,
-                title=title,
+                title=summary,
                 start=dtstart,
                 end=dtend,
                 all_day=all_day,
                 description=description,
                 location=location,
             )
-            _LOGGER.debug("TimeTree Enhanced: event created – '%s'", title)
+            _LOGGER.debug("TimeTree Enhanced: event created – '%s'", summary)
         except TimeTreeAPIError as err:
             _LOGGER.error("TimeTree Enhanced: event creation failed: %s", err)
             raise
 
         await self.coordinator.async_request_refresh()
-
-    def _build_create_title(self, summary: str) -> str:
-        return summary
 
 
 class TimeTreeAllCalendar(TimeTreeBaseCalendar):
@@ -244,12 +216,9 @@ class TimeTreeAllCalendar(TimeTreeBaseCalendar):
         self._attr_name = f"{calendar_name} – Alle"
         self._attr_unique_id = f"{DOMAIN}_{calendar_id}_all"
 
-    def _event_belongs(self, member: str) -> bool:  # noqa: ARG002
-        return True
-
 
 class TimeTreeMemberCalendar(TimeTreeBaseCalendar):
-    """Shows only events belonging to one calendar member."""
+    """Shows only events whose label matches this calendar member."""
 
     def __init__(
         self,
@@ -258,37 +227,100 @@ class TimeTreeMemberCalendar(TimeTreeBaseCalendar):
         calendar_id: str,
         calendar_name: str,
         member_name: str,
+        member_label: str,
         color: str,
         tz: str,
     ) -> None:
         super().__init__(coordinator, api, calendar_id, calendar_name, tz)
-        self._member = member_name
+        self._member_name = member_name
+        self._member_label = member_label
         self._color = color
         self._attr_name = f"{calendar_name} – {member_name}"
         self._attr_unique_id = (
-            f"{DOMAIN}_{calendar_id}_{member_name.lower().replace(' ', '_')}"
+            f"{DOMAIN}_{calendar_id}_member_{member_name.lower().replace(' ', '_')}"
         )
+
+    def _event_belongs(self, event: dict) -> bool:
+        return _event_label_name(event).lower() == self._member_label.lower()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         base = super().extra_state_attributes
-        base["member"] = self._member
+        base["member"] = self._member_name
         base["color_hint"] = self._color
         return base
 
-    def _event_belongs(self, member: str) -> bool:
-        return member == self._member
 
-    def _build_create_title(self, summary: str) -> str:
-        if summary.startswith(f"{self._member}:"):
-            return summary
-        return f"{self._member}: {summary}"
+def _raw_to_calendar_event(event: dict, display_title: str) -> CalendarEvent | None:
+    """Convert a raw TimeTree event dict to a HA CalendarEvent."""
+    try:
+        uid = str(event.get("id", ""))
+        all_day: bool = bool(event.get("all_day", False))
+        start_raw = event.get("start_at") or event.get("start")
+        end_raw = event.get("end_at") or event.get("end")
+
+        if not start_raw or not end_raw:
+            return None
+
+        if all_day:
+            start_dt = _parse_date(start_raw)
+            end_dt = _parse_date(end_raw)
+            if start_dt is None or end_dt is None:
+                return None
+            if isinstance(start_dt, datetime):
+                start_dt = start_dt.date()
+            if isinstance(end_dt, datetime):
+                end_dt = end_dt.date()
+            if end_dt <= start_dt:
+                end_dt = start_dt + timedelta(days=1)
+            return CalendarEvent(
+                summary=display_title,
+                start=start_dt,
+                end=end_dt,
+                description=event.get("description") or None,
+                location=event.get("location") or None,
+                uid=uid,
+            )
+        else:
+            start_dt = _parse_datetime(start_raw)
+            end_dt = _parse_datetime(end_raw)
+            if start_dt is None or end_dt is None:
+                return None
+            if end_dt <= start_dt:
+                end_dt = start_dt + timedelta(minutes=30)
+            return CalendarEvent(
+                summary=display_title,
+                start=start_dt,
+                end=end_dt,
+                description=event.get("description") or None,
+                location=event.get("location") or None,
+                uid=uid,
+            )
+    except Exception:
+        _LOGGER.exception("TimeTree Enhanced: failed to parse event %s", event.get("id"))
+        return None
 
 
 def _as_datetime(dt: datetime | date) -> datetime:
-    """Coerce a date to a timezone-aware midnight datetime for range comparisons."""
     if isinstance(dt, datetime):
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     return datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
+
+
+def _parse_datetime(raw: str) -> datetime | None:
+    try:
+        raw = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _parse_date(raw: str) -> date | None:
+    try:
+        if "T" in raw or " " in raw:
+            dt = _parse_datetime(raw)
+            return dt.date() if dt else None
+        return date.fromisoformat(raw[:10])
+    except (ValueError, AttributeError):
+        return None

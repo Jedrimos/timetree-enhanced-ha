@@ -148,6 +148,59 @@ class TimeTreeAPI:
 
         return events
 
+    async def get_calendar_members(self, calendar_id: str) -> list[dict[str, Any]]:
+        """Return members of a shared calendar with their label info.
+
+        Tries /calendars/{id}/members, then /calendars/{id} as fallback.
+        Each returned dict has 'name' and 'label_name' keys.
+        """
+        for path in (f"calendars/{calendar_id}/members", f"calendars/{calendar_id}"):
+            try:
+                data = await self._get(path)
+            except TimeTreeAPIError:
+                continue
+
+            cal = data.get("calendar") or data.get("data") or data
+            members_raw = (
+                data.get("members")
+                or (cal.get("members") if isinstance(cal, dict) else None)
+                or []
+            )
+
+            if not members_raw:
+                continue
+
+            result: list[dict[str, Any]] = []
+            for m in members_raw:
+                attrs = m.get("attributes") or m
+                name = (attrs.get("name") or attrs.get("display_name") or "").strip()
+                label = attrs.get("label") or {}
+                label_name = (
+                    (label.get("name") or "").strip()
+                    if isinstance(label, dict)
+                    else ""
+                )
+                color = (
+                    (label.get("color") or label.get("color_name") or "").strip()
+                    if isinstance(label, dict)
+                    else ""
+                )
+                if name:
+                    result.append({
+                        "name": name,
+                        "label_name": label_name or name,
+                        "color": color,
+                    })
+
+            if result:
+                _LOGGER.debug(
+                    "TimeTree Enhanced: found %d members via %s: %s", len(result), path, result
+                )
+                return result
+
+        _LOGGER.debug("TimeTree Enhanced: no member list found for calendar %s", calendar_id)
+        return []
+
     async def get_upcoming_events(
         self,
         calendar_id: str,
