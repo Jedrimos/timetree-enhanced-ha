@@ -70,11 +70,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await store.async_save({"session_id": cookie.value})
 
     async def _get_events() -> list[dict]:
-        """Fetch upcoming events from TimeTree."""
-        events = await api.get_upcoming_events(calendar_id, days=fetch_days, tz=tz)
+        """Fetch events via the sync endpoint and return those within the configured window."""
+        all_events = await api.get_all_events_sync(calendar_id)
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(days=fetch_days)
+        events = _filter_events_in_range(all_events, now, end)
         _LOGGER.debug(
-            "TimeTree Enhanced: %d events via upcoming_events for %s",
+            "TimeTree Enhanced: %d/%d events in window for %s",
             len(events),
+            len(all_events),
             calendar_id,
         )
         last_sync["time"] = datetime.now(timezone.utc)
