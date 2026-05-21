@@ -297,7 +297,7 @@ def _raw_to_calendar_event(event: dict, display_title: str) -> CalendarEvent | N
                 uid=uid,
             )
     except Exception:
-        _LOGGER.exception("TimeTree Enhanced: failed to parse event %s", event.get("id"))
+        _LOGGER.debug("TimeTree Enhanced: failed to parse event %s", event.get("id"))
         return None
 
 
@@ -307,20 +307,27 @@ def _as_datetime(dt: datetime | date) -> datetime:
     return datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
 
 
-def _parse_datetime(raw: str) -> datetime | None:
+def _parse_datetime(raw: str | int | float) -> datetime | None:
+    """Parse ISO string or Unix timestamp (int/float) to UTC-aware datetime."""
     try:
-        raw = raw.replace("Z", "+00:00")
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(raw, tz=timezone.utc)
+        raw = str(raw).replace("Z", "+00:00")
         dt = datetime.fromisoformat(raw)
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, OSError):
         return None
 
 
-def _parse_date(raw: str) -> date | None:
+def _parse_date(raw: str | int | float) -> date | None:
+    """Parse ISO date string or Unix timestamp to a date."""
     try:
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(raw, tz=timezone.utc).date()
+        raw = str(raw)
         if "T" in raw or " " in raw:
             dt = _parse_datetime(raw)
             return dt.date() if dt else None
         return date.fromisoformat(raw[:10])
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, OSError):
         return None

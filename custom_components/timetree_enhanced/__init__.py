@@ -134,13 +134,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     members: list[dict] = []
     try:
         members = await api.get_calendar_members(calendar_id)
-        _LOGGER.info(
-            "TimeTree Enhanced: %d calendar members found: %s",
-            len(members),
-            [m["name"] for m in members],
-        )
     except Exception:
-        _LOGGER.debug("TimeTree Enhanced: could not fetch calendar members")
+        _LOGGER.debug("TimeTree Enhanced: member fetch raised an exception")
+
+    # Fallback: if the API didn't return member info, derive members from
+    # the unique labels found in the current events window.
+    if not members and coordinator.data:
+        members = _members_from_event_labels(coordinator.data)
+        if members:
+            _LOGGER.info(
+                "TimeTree Enhanced: derived %d members from event labels "
+                "(API had no member data): %s",
+                len(members),
+                [m["name"] for m in members],
+            )
 
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
@@ -169,6 +176,39 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+_CATEGORY_LABEL_KEYWORDS = {
+    "geburtstag", "birthday", "urlaub", "vacation", "feiertag", "holiday",
+    "arbeit", "work", "job", "bank", "schule", "school", "arzt", "doctor",
+    "sport", "einkauf", "shopping", "termin", "appointment",
+    "ebay", "amazon", "müll", "garbage", "sonstiges", "sonstige", "misc",
+}
+
+
+def _members_from_event_labels(events: list[dict]) -> list[dict]:
+    """Derive a member list from the unique label names seen in events.
+
+    Skips labels that look like categories (known keywords) rather than
+    person names. Each returned dict has 'name', 'label_name', 'color'.
+    """
+    seen: dict[str, dict] = {}
+    for ev in events:
+        label = ev.get("label") or {}
+        if not isinstance(label, dict):
+            continue
+        name = (label.get("name") or "").strip()
+        if not name:
+            continue
+        if name.lower() in _CATEGORY_LABEL_KEYWORDS:
+            continue
+        # Skip labels with spaces that look like sentences (category phrases)
+        if len(name.split()) > 2:
+            continue
+        if name not in seen:
+            color = (label.get("color") or label.get("color_name") or "").strip()
+            seen[name] = {"name": name, "label_name": name, "color": color}
+    return sorted(seen.values(), key=lambda m: m["name"])
+
+
 def _filter_events_in_range(
     events: list[dict],
     start: datetime,
@@ -179,26 +219,26 @@ def _filter_events_in_range(
     for ev in events:
         ev_start_raw = ev.get("start_at") or ev.get("dt_start")
         ev_end_raw = ev.get("end_at") or ev.get("dt_end") or ev_start_raw
-        if not ev_start_raw:
-            result.append(ev)  # keep events with no timestamp (can't filter)
-            continue
+        if ev_start_raw is None:
+            continue  # skip events with no timestamp
         try:
             ev_start = _parse_dt(ev_start_raw)
             ev_end = _parse_dt(ev_end_raw)
             if ev_end >= start and ev_start <= end:
                 result.append(ev)
-        except (ValueError, TypeError):
-            result.append(ev)  # keep unparseable events
+        except Exception:
+            continue  # skip unparseable events rather than keeping them
     return result
 
 
-def _parse_dt(value: str) -> datetime:
-    """Parse ISO datetime or date string to an aware datetime."""
-    if len(value) == 10:
-        # all-day: YYYY-MM-DD → treat as midnight UTC
+def _parse_dt(value: str | int | float) -> datetime:
+    """Parse ISO datetime string or Unix timestamp to a UTC-aware datetime."""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    value = str(value)
+    if len(value) == 10 and "T" not in value:
         return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
-    # Strip trailing Z and make UTC-aware
-    value = value.rstrip("Z")
+    value = value.replace("Z", "+00:00")
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
