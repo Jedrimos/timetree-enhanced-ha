@@ -179,26 +179,26 @@ def _filter_events_in_range(
     for ev in events:
         ev_start_raw = ev.get("start_at") or ev.get("dt_start")
         ev_end_raw = ev.get("end_at") or ev.get("dt_end") or ev_start_raw
-        if not ev_start_raw:
-            result.append(ev)  # keep events with no timestamp (can't filter)
-            continue
+        if ev_start_raw is None:
+            continue  # skip events with no timestamp
         try:
             ev_start = _parse_dt(ev_start_raw)
             ev_end = _parse_dt(ev_end_raw)
             if ev_end >= start and ev_start <= end:
                 result.append(ev)
-        except (ValueError, TypeError):
-            result.append(ev)  # keep unparseable events
+        except Exception:
+            continue  # skip unparseable events rather than keeping them
     return result
 
 
-def _parse_dt(value: str) -> datetime:
-    """Parse ISO datetime or date string to an aware datetime."""
-    if len(value) == 10:
-        # all-day: YYYY-MM-DD → treat as midnight UTC
+def _parse_dt(value: str | int | float) -> datetime:
+    """Parse ISO datetime string or Unix timestamp to a UTC-aware datetime."""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    value = str(value)
+    if len(value) == 10 and "T" not in value:
         return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
-    # Strip trailing Z and make UTC-aware
-    value = value.rstrip("Z")
+    value = value.replace("Z", "+00:00")
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
