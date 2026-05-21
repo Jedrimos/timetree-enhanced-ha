@@ -296,23 +296,24 @@ def _expand_event(ev: dict, window_start: datetime, window_end: datetime) -> lis
         return [ev]
 
     # --- Skip-ahead optimisation ---
-    # Jump cursor forward so we don't iterate through years of past occurrences.
-    # We also track occurrence_count for COUNT= support.
+    # Compute skip in STEPS (not raw time units) so _advance(cursor, skip)
+    # doesn't double-multiply by interval (which caused the cursor to overshoot
+    # the window for events with INTERVAL > 1, producing zero results).
     cursor = base_start
     occurrence_count = 0
 
     try:
         if freq == "YEARLY":
-            skip = max(0, window_start.year - base_start.year - 1) // interval * interval
+            skip = max(0, window_start.year - base_start.year - 1) // interval
         elif freq == "MONTHLY":
             delta_m = (window_start.year - base_start.year) * 12 + window_start.month - base_start.month
-            skip = max(0, delta_m - 1) // interval * interval
+            skip = max(0, delta_m - 1) // interval
         elif freq == "WEEKLY":
             delta_w = max(0, (window_start - base_start).days // 7 - 1)
-            skip = delta_w // interval * interval
+            skip = delta_w // interval
         else:  # DAILY
             delta_d = max(0, (window_start - base_start).days - 1)
-            skip = delta_d // interval * interval
+            skip = delta_d // interval
 
         if skip > 0:
             cursor = _advance(cursor, skip)
