@@ -12,9 +12,10 @@ _LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://timetreeapp.com/api/v1"
 
 HEADERS_BASE = {
-    "User-Agent": "TimeTree/5.22.0 (iPhone; iOS 17.0; Scale/3.00)",
+    "User-Agent": "TimeTree/7.21.1 (iPhone; iOS 17.5; Scale/3.00)",
     "Accept": "application/json",
     "Content-Type": "application/json",
+    "X-Requested-With": "XMLHttpRequest",
 }
 
 
@@ -40,18 +41,46 @@ class TimeTreeAPI:
                 f"{BASE_URL}/auth/sign_in",
                 json={"email": email, "password": password},
                 headers=HEADERS_BASE,
+                allow_redirects=True,
             )
         except aiohttp.ClientError as err:
+            _LOGGER.error("TimeTree Enhanced: network error during login: %s", err)
             raise TimeTreeAPIError(f"Network error during login: {err}") from err
 
-        if resp.status == 401:
-            raise TimeTreeAuthError("Invalid email or password")
-        if resp.status != 200:
-            raise TimeTreeAPIError(f"Login returned HTTP {resp.status}")
+        body = await resp.text()
+        _LOGGER.debug(
+            "TimeTree Enhanced: login response HTTP %s – %.300s", resp.status, body
+        )
 
-        data = await resp.json()
-        self._session_id = data.get("session_id")
+        if resp.status in (401, 403):
+            raise TimeTreeAuthError("Invalid email or password")
+        if resp.status == 422:
+            raise TimeTreeAuthError(f"Login rejected (422): {body[:200]}")
+        if resp.status != 200:
+            raise TimeTreeAPIError(
+                f"Login returned HTTP {resp.status}: {body[:200]}"
+            )
+
+        try:
+            data = await resp.json(content_type=None)
+        except Exception as err:
+            _LOGGER.error(
+                "TimeTree Enhanced: could not parse login JSON – %s – body: %.300s",
+                err, body,
+            )
+            raise TimeTreeAPIError(f"Login response not valid JSON: {err}") from err
+
+        # session_id may be top-level or nested under "user" / "data"
+        self._session_id = (
+            data.get("session_id")
+            or (data.get("user") or {}).get("session_id")
+            or (data.get("data") or {}).get("session_id")
+        )
         if not self._session_id:
+            _LOGGER.error(
+                "TimeTree Enhanced: no session_id in login response – keys: %s",
+                list(data.keys()),
+            )
             raise TimeTreeAuthError("No session_id in login response")
 
         _LOGGER.debug("TimeTree Enhanced: login successful")
@@ -139,9 +168,11 @@ class TimeTreeAPI:
         if resp.status == 401:
             raise TimeTreeAuthError("Session expired")
         if resp.status != 200:
+            body = await resp.text()
+            _LOGGER.debug("TimeTree Enhanced: GET /%s HTTP %s – %.200s", path, resp.status, body)
             raise TimeTreeAPIError(f"GET /{path} returned HTTP {resp.status}")
 
-        return await resp.json()
+        return await resp.json(content_type=None)
 
     async def _post(self, path: str, payload: dict) -> dict[str, Any]:
         try:
@@ -157,8 +188,9 @@ class TimeTreeAPI:
             raise TimeTreeAuthError("Session expired")
         if resp.status not in (200, 201):
             body = await resp.text()
+            _LOGGER.debug("TimeTree Enhanced: POST /%s HTTP %s – %.200s", path, resp.status, body)
             raise TimeTreeAPIError(
                 f"POST /{path} returned HTTP {resp.status}: {body}"
             )
 
-        return await resp.json()
+        return await resp.json(content_type=None)
