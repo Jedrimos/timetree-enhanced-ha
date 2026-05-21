@@ -271,8 +271,13 @@ def _raw_to_calendar_event(event: dict, display_title: str) -> CalendarEvent | N
                 start_dt = start_dt.date()
             if isinstance(end_dt, datetime):
                 end_dt = end_dt.date()
+            # HA CalendarEvent requires exclusive end for all-day events.
+            # TimeTree sync stores end_at as the last visible day (inclusive),
+            # so we always add 1 day to get the iCal-style exclusive end.
             if end_dt <= start_dt:
                 end_dt = start_dt + timedelta(days=1)
+            else:
+                end_dt = end_dt + timedelta(days=1)
             return CalendarEvent(
                 summary=display_title,
                 start=start_dt,
