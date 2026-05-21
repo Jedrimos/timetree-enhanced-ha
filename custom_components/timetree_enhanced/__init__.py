@@ -37,7 +37,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     api = TimeTreeAPI()
+    try:
+        return await _async_setup_entry_inner(hass, entry, api)
+    except Exception:
+        await api.close()
+        raise
 
+
+async def _async_setup_entry_inner(
+    hass: HomeAssistant, entry: ConfigEntry, api: TimeTreeAPI
+) -> bool:
+    """Inner setup — api.close() is guaranteed by the caller on any exception."""
     scan_interval: int = entry.options.get(
         CONF_SCAN_INTERVAL,
         entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
@@ -158,15 +168,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.debug("TimeTree Enhanced: member fetch raised an exception")
 
-    # 2. Labels endpoint (colors) × event data (active filtering).
-    #    Only create a calendar for labels that have ≥1 upcoming event —
-    #    this avoids empty calendars for unused labels.
+    # 2. Labels endpoint (colors + ids) × event data (active filtering).
+    #    Only create a calendar for labels that have ≥1 upcoming event.
     if not members and coordinator.data:
+        label_color_map: dict[str, str] = {}
+        label_id_map: dict[str, int | None] = {}
         try:
             all_labels = await api.get_calendar_labels(calendar_id)
-            label_color_map = {lbl["name"].lower(): lbl["color"] for lbl in all_labels}
+            for lbl in all_labels:
+                key = lbl["name"].lower()
+                label_color_map[key] = lbl["color"]
+                label_id_map[key] = lbl.get("id")
         except Exception:
-            label_color_map = {}
+            pass
 
         active = _members_from_event_labels(coordinator.data)
         members = [
@@ -174,6 +188,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "name": m["name"],
                 "label_name": m["label_name"],
                 "color": label_color_map.get(m["name"].lower()) or m.get("color", ""),
+                "label_id": label_id_map.get(m["name"].lower()),
             }
             for m in active
             if m["name"].lower() not in DEFAULT_LABEL_NAMES
@@ -282,8 +297,12 @@ def _expand_event(ev: dict, window_start: datetime, window_end: datetime) -> lis
         if freq == "YEARLY":
             return cur.replace(year=cur.year + steps)
         if freq == "MONTHLY":
+            import calendar as _cal
             m = cur.month - 1 + steps
-            return cur.replace(year=cur.year + m // 12, month=m % 12 + 1)
+            new_year = cur.year + m // 12
+            new_month = m % 12 + 1
+            max_day = _cal.monthrange(new_year, new_month)[1]
+            return cur.replace(year=new_year, month=new_month, day=min(cur.day, max_day))
         if freq == "WEEKLY":
             return cur + timedelta(weeks=steps)
         if freq == "DAILY":
