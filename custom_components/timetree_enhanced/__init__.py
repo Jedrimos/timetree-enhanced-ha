@@ -63,17 +63,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Range endpoint includes recurring events (birthdays, anniversaries)
             try:
                 events = await api.get_events_in_range(calendar_id, start, end, tz=tz)
-                if events:
-                    _LOGGER.debug(
-                        "TimeTree Enhanced: %d events via range endpoint for %s",
-                        len(events),
-                        calendar_id,
-                    )
-                    last_sync["time"] = datetime.now(timezone.utc)
-                    return events
-            except TimeTreeAPIError:
+                _LOGGER.debug(
+                    "TimeTree Enhanced: %d events via range endpoint for %s",
+                    len(events),
+                    calendar_id,
+                )
+                last_sync["time"] = datetime.now(timezone.utc)
+                return events
+            except TimeTreeAPIError as range_err:
                 _LOGGER.warning(
-                    "TimeTree Enhanced: range endpoint failed, falling back to upcoming_events"
+                    "TimeTree Enhanced: range endpoint failed (%s), falling back to upcoming_events",
+                    range_err,
                 )
 
             # Fallback: upcoming_events (no recurring)

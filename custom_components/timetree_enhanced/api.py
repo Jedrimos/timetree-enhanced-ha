@@ -196,8 +196,8 @@ class TimeTreeAPI:
             raise TimeTreeAuthError("Session expired")
         if resp.status != 200:
             body = await resp.text()
-            _LOGGER.debug("TimeTree Enhanced: GET /%s HTTP %s – %.200s", path, resp.status, body)
-            raise TimeTreeAPIError(f"GET /{path} returned HTTP {resp.status}")
+            _LOGGER.debug("TimeTree Enhanced: GET /%s HTTP %s – %.500s", path, resp.status, body)
+            raise TimeTreeAPIError(f"GET /{path} returned HTTP {resp.status}: {body[:200]}")
 
         return await resp.json(content_type=None)
 
