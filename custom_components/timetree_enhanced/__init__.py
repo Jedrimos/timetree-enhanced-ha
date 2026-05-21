@@ -70,15 +70,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await store.async_save({"session_id": cookie.value})
 
     async def _get_events() -> list[dict]:
-        """Fetch events via the sync endpoint and return those within the configured window."""
+        """Fetch events via the sync endpoint, enrich with label info, expand recurring."""
         all_events = await api.get_all_events_sync(calendar_id)
+
+        # Build label_id → label dict mapping so events with label_id get a label object
+        label_map: dict[int | str, dict] = {}
+        try:
+            labels = await api.get_calendar_labels(calendar_id)
+            for lbl in labels:
+                if lbl.get("id") is not None:
+                    label_map[lbl["id"]] = {"name": lbl["name"], "color": lbl["color"]}
+        except Exception:
+            _LOGGER.debug("TimeTree Enhanced: could not fetch labels for event enrichment")
+
         now = datetime.now(timezone.utc)
         end = now + timedelta(days=fetch_days)
-        events = _filter_events_in_range(all_events, now, end)
+
+        enriched: list[dict] = []
+        for ev in all_events:
+            # Inject label object when only label_id is present
+            if not ev.get("label") and ev.get("label_id") is not None:
+                lbl = label_map.get(ev["label_id"])
+                if lbl:
+                    ev = {**ev, "label": lbl}
+
+            # Expand recurring events into individual occurrences within the window
+            for occurrence in _expand_event(ev, now, end):
+                enriched.append(occurrence)
+
+        events = _filter_events_in_range(enriched, now, end)
         _LOGGER.debug(
-            "TimeTree Enhanced: %d/%d events in window for %s",
+            "TimeTree Enhanced: %d events in window (%d raw, %d after expansion) for %s",
             len(events),
             len(all_events),
+            len(enriched),
             calendar_id,
         )
         last_sync["time"] = datetime.now(timezone.utc)
@@ -186,6 +211,127 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _expand_event(ev: dict, window_start: datetime, window_end: datetime) -> list[dict]:
+    """Return a list of event dicts for the given window.
+
+    Non-recurring events are returned as-is (single item list).
+    Recurring events are expanded: for each supported frequency (DAILY, WEEKLY,
+    MONTHLY, YEARLY) we generate all occurrences that fall inside [window_start,
+    window_end].  Unknown/unparseable recurrence rules fall back to returning the
+    raw event unchanged so the caller can still filter it by date.
+    """
+    import re as _re
+
+    rrule_raw: str = (ev.get("recurrences") or ev.get("recurrence") or ev.get("rrule") or "").strip()
+    if not rrule_raw:
+        return [ev]
+
+    start_raw = ev.get("start_at") or ev.get("dt_start")
+    end_raw = ev.get("end_at") or ev.get("dt_end") or start_raw
+    if start_raw is None:
+        return [ev]
+
+    try:
+        base_start = _parse_dt(start_raw)
+        base_end = _parse_dt(end_raw)
+        duration = base_end - base_start
+    except Exception:
+        return [ev]
+
+    # Parse FREQ from RRULE string (e.g. "RRULE:FREQ=YEARLY;BYDAY=...")
+    freq_match = _re.search(r"FREQ=(\w+)", rrule_raw, _re.IGNORECASE)
+    if not freq_match:
+        return [ev]
+    freq = freq_match.group(1).upper()
+
+    # Build candidate occurrences covering the window
+    candidates: list[datetime] = []
+    cursor = base_start
+
+    # How far back we need to go to catch long-duration or edge events
+    look_back = timedelta(days=1)
+
+    if freq == "YEARLY":
+        # Align to first occurrence >= window_start - look_back
+        target = window_start - look_back
+        while cursor < target:
+            try:
+                cursor = cursor.replace(year=cursor.year + 1)
+            except ValueError:
+                break
+        # Also check the year before in case we overshot
+        try:
+            prev = cursor.replace(year=cursor.year - 1)
+            if prev >= target:
+                candidates.append(prev)
+        except ValueError:
+            pass
+        while cursor <= window_end:
+            candidates.append(cursor)
+            try:
+                cursor = cursor.replace(year=cursor.year + 1)
+            except ValueError:
+                break
+
+    elif freq == "MONTHLY":
+        target = window_start - look_back
+        while cursor < target:
+            year, month = cursor.year, cursor.month + 1
+            if month > 12:
+                year, month = year + 1, 1
+            try:
+                cursor = cursor.replace(year=year, month=month)
+            except ValueError:
+                break
+        while cursor <= window_end:
+            candidates.append(cursor)
+            year, month = cursor.year, cursor.month + 1
+            if month > 12:
+                year, month = year + 1, 1
+            try:
+                cursor = cursor.replace(year=year, month=month)
+            except ValueError:
+                break
+
+    elif freq == "WEEKLY":
+        target = window_start - look_back
+        while cursor < target:
+            cursor += timedelta(weeks=1)
+        while cursor <= window_end:
+            candidates.append(cursor)
+            cursor += timedelta(weeks=1)
+
+    elif freq == "DAILY":
+        target = window_start - look_back
+        while cursor < target:
+            cursor += timedelta(days=1)
+        while cursor <= window_end:
+            candidates.append(cursor)
+            cursor += timedelta(days=1)
+
+    else:
+        return [ev]
+
+    if not candidates:
+        return [ev]
+
+    result = []
+    for occ_start in candidates:
+        occ_end = occ_start + duration
+        if occ_end < window_start or occ_start > window_end:
+            continue
+        # Determine correct timestamp format (ms or ISO string) to match original
+        if isinstance(start_raw, (int, float)):
+            new_start: int | str = int(occ_start.timestamp() * 1000)
+            new_end: int | str = int(occ_end.timestamp() * 1000)
+        else:
+            new_start = occ_start.isoformat()
+            new_end = occ_end.isoformat()
+        result.append({**ev, "start_at": new_start, "end_at": new_end})
+
+    return result if result else [ev]
 
 
 def _members_from_event_labels(events: list[dict]) -> list[dict]:
