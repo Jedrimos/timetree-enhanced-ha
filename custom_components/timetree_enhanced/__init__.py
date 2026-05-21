@@ -158,31 +158,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.debug("TimeTree Enhanced: member fetch raised an exception")
 
-    # 2. Calendar labels endpoint — returns all defined labels with name & color
-    if not members:
-        try:
-            labels = await api.get_calendar_labels(calendar_id)
-            members = [
-                {"name": lbl["name"], "label_name": lbl["name"], "color": lbl["color"]}
-                for lbl in labels
-                if lbl["name"].lower() not in DEFAULT_LABEL_NAMES
-            ]
-            if members:
-                _LOGGER.info(
-                    "TimeTree Enhanced: %d members from labels endpoint: %s",
-                    len(members),
-                    [m["name"] for m in members],
-                )
-        except Exception:
-            _LOGGER.debug("TimeTree Enhanced: labels fetch raised an exception")
-
-    # 3. Last resort: derive from unique labels on future events
+    # 2. Labels endpoint (colors) × event data (active filtering).
+    #    Only create a calendar for labels that have ≥1 upcoming event —
+    #    this avoids empty calendars for unused labels.
     if not members and coordinator.data:
-        members = _members_from_event_labels(coordinator.data)
+        try:
+            all_labels = await api.get_calendar_labels(calendar_id)
+            label_color_map = {lbl["name"].lower(): lbl["color"] for lbl in all_labels}
+        except Exception:
+            label_color_map = {}
+
+        active = _members_from_event_labels(coordinator.data)
+        members = [
+            {
+                "name": m["name"],
+                "label_name": m["label_name"],
+                "color": label_color_map.get(m["name"].lower()) or m.get("color", ""),
+            }
+            for m in active
+            if m["name"].lower() not in DEFAULT_LABEL_NAMES
+        ]
         if members:
             _LOGGER.info(
-                "TimeTree Enhanced: derived %d members from event labels "
-                "(API had no label data): %s",
+                "TimeTree Enhanced: %d active label calendars: %s",
                 len(members),
                 [m["name"] for m in members],
             )
