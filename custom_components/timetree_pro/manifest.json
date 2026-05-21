@@ -1,0 +1,13 @@
+{
+  "domain": "timetree_pro",
+  "name": "TimeTree Pro",
+  "version": "1.0.0",
+  "codeowners": ["@jedrimos"],
+  "config_flow": true,
+  "documentation": "https://github.com/jedrimos/timetree-enhanced-ha",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "dependencies": [],
+  "after_dependencies": []
+}

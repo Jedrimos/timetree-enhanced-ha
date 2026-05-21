@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "TimeTree Pro – Sign In",
+        "description": "Enter your TimeTree credentials.",
+        "data": {
+          "email": "E-Mail",
+          "password": "Password"
+        }
+      },
+      "calendar": {
+        "title": "Select Calendar",
+        "description": "Found {calendar_count} calendar(s). Choose the one to sync.",
+        "data": {
+          "calendar_id": "Calendar",
+          "timezone": "Time Zone",
+          "fetch_days": "Fetch window (days)",
+          "scan_interval": "Sync interval (minutes)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid e-mail or password.",
+      "cannot_connect": "Could not connect to TimeTree. Check internet connection.",
+      "no_calendars": "No calendars found for this account.",
+      "unknown": "Unexpected error. Check the logs."
+    },
+    "abort": {
+      "already_configured": "This calendar is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TimeTree Pro – Options",
+        "data": {
+          "scan_interval": "Sync interval (minutes)",
+          "fetch_days": "Fetch window (days)"
+        }
+      }
+    }
+  }
+}

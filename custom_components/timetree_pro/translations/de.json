@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "TimeTree Pro – Anmeldung",
+        "description": "Bitte gib deine TimeTree-Zugangsdaten ein.",
+        "data": {
+          "email": "E-Mail-Adresse",
+          "password": "Passwort"
+        }
+      },
+      "calendar": {
+        "title": "Kalender auswählen",
+        "description": "{calendar_count} Kalender gefunden. Wähle den Familienkalender aus.",
+        "data": {
+          "calendar_id": "Kalender",
+          "timezone": "Zeitzone",
+          "fetch_days": "Vorschauzeitraum (Tage)",
+          "scan_interval": "Sync-Intervall (Minuten)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "E-Mail oder Passwort ist falsch.",
+      "cannot_connect": "Verbindung zu TimeTree fehlgeschlagen. Internetverbindung prüfen.",
+      "no_calendars": "Keine Kalender gefunden. Prüfe deinen TimeTree-Account.",
+      "unknown": "Unbekannter Fehler. Bitte Logs prüfen."
+    },
+    "abort": {
+      "already_configured": "Dieser Kalender ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TimeTree Pro – Einstellungen",
+        "data": {
+          "scan_interval": "Sync-Intervall (Minuten)",
+          "fetch_days": "Vorschauzeitraum (Tage)"
+        }
+      }
+    }
+  }
+}
