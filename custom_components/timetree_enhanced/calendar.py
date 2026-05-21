@@ -277,7 +277,7 @@ def _raw_to_calendar_event(event: dict, display_title: str) -> CalendarEvent | N
                 summary=display_title,
                 start=start_dt,
                 end=end_dt,
-                description=event.get("description") or None,
+                description=event.get("note") or event.get("description") or None,
                 location=event.get("location") or None,
                 uid=uid,
             )
@@ -292,7 +292,7 @@ def _raw_to_calendar_event(event: dict, display_title: str) -> CalendarEvent | N
                 summary=display_title,
                 start=start_dt,
                 end=end_dt,
-                description=event.get("description") or None,
+                description=event.get("note") or event.get("description") or None,
                 location=event.get("location") or None,
                 uid=uid,
             )

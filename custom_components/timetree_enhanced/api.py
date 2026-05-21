@@ -133,6 +133,7 @@ class TimeTreeAPI:
         """Return members of a shared calendar with their label info."""
         paths = [
             f"calendars/{calendar_id}/members",
+            f"calendars/{calendar_id}/users",
             f"calendars/{calendar_id}",
         ]
         for path in paths:
@@ -142,11 +143,12 @@ class TimeTreeAPI:
                 _LOGGER.debug("TimeTree Enhanced: members path /%s failed: %s", path, err)
                 continue
 
-            _LOGGER.debug(
-                "TimeTree Enhanced: members /%s → keys=%s  snippet=%.400s",
+            # Always log the full response at INFO level so we can see the structure
+            _LOGGER.info(
+                "TimeTree Enhanced: members /%s → keys=%s  full=%.800s",
                 path,
                 list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-                str(data)[:400],
+                str(data)[:800],
             )
 
             cal = data.get("calendar") or data.get("data") or data
@@ -173,7 +175,11 @@ class TimeTreeAPI:
                 label = attrs.get("label") or {}
                 if isinstance(label, dict):
                     label_name = (label.get("name") or "").strip()
-                    color = (label.get("color") or label.get("color_name") or "").strip()
+                    color_val = label.get("color") or label.get("color_name") or ""
+                    if isinstance(color_val, int):
+                        color = f"#{color_val:06x}"
+                    else:
+                        color = str(color_val).strip()
                 else:
                     label_name = ""
                     color = ""
@@ -191,7 +197,7 @@ class TimeTreeAPI:
                 )
                 return result
 
-        _LOGGER.debug("TimeTree Enhanced: no member data found via API")
+        _LOGGER.info("TimeTree Enhanced: no member data found via API — using label fallback")
         return []
 
     async def get_calendar_labels(self, calendar_id: str) -> list[dict[str, Any]]:
