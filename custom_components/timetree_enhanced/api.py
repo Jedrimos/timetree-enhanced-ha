@@ -6,6 +6,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 
@@ -13,10 +14,17 @@ _LOGGER = logging.getLogger(__name__)
 
 BASE_URL = "https://timetreeapp.com/api/v1"
 
-HEADERS_BASE = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
+# Headers that mimic the TimeTree web app — Origin is required by the server
+_SESSION_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
     "X-Timetreea": "web/2.1.0/en",
+    "Origin": "https://timetreeapp.com",
+}
+
+_LOGIN_HEADERS = {
+    **_SESSION_HEADERS,
+    "Content-Type": "application/json",
+    "Referer": "https://timetreeapp.com/signin",
 }
 
 
@@ -28,161 +36,119 @@ class TimeTreeAPIError(Exception):
     """General API error."""
 
 
+def _ts_to_dt(ms: int | float, tz_name: str = "UTC") -> datetime:
+    """Convert a Unix millisecond timestamp to a timezone-aware datetime."""
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        tz = timezone.utc
+    # Values > 1e10 are in milliseconds, smaller ones are seconds
+    secs = ms / 1000 if ms > 1e10 else ms
+    return datetime.fromtimestamp(secs, tz=tz)
+
+
 class TimeTreeAPI:
     """Minimal async wrapper around the TimeTree internal APP API."""
 
-    def __init__(self, session: aiohttp.ClientSession) -> None:
-        self._session = session
-        self._session_id: str | None = None
+    def __init__(self) -> None:
+        # Dedicated session with unsafe cookie jar so _session_id is stored
+        # and sent automatically — no manual Cookie header management needed.
+        self._session = aiohttp.ClientSession(
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
+            headers=_SESSION_HEADERS,
+        )
+
+    async def close(self) -> None:
+        await self._session.close()
 
     @property
     def is_authenticated(self) -> bool:
-        return self._session_id is not None
+        cookies = self._session.cookie_jar.filter_cookies(BASE_URL)
+        return "_session_id" in cookies
 
     def invalidate_session(self) -> None:
-        self._session_id = None
+        self._session.cookie_jar.clear()
 
     async def login(self, email: str, password: str) -> None:
         """Obtain a session_id. Raises TimeTreeAuthError on failure."""
         device_uuid = uuid.uuid4().hex
         try:
-            resp = await self._session.put(
+            async with self._session.put(
                 f"{BASE_URL}/auth/email/signin",
+                headers=_LOGIN_HEADERS,
                 json={"uid": email, "password": password, "uuid": device_uuid},
-                headers=HEADERS_BASE,
-                allow_redirects=True,
-            )
-            body = await resp.text()
+            ) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {}
+                body_preview = str(data)[:300]
+
+                _LOGGER.debug(
+                    "TimeTree Enhanced: login HTTP %s — %s", resp.status, body_preview
+                )
+
+                if resp.status != 200:
+                    code = (data.get("error") or {}).get("code")
+                    if code == -702:
+                        raise TimeTreeAuthError("Invalid email or password")
+                    if code == -495:
+                        raise TimeTreeAPIError(
+                            f"Login returned HTTP {resp.status} (rate limited): {body_preview}"
+                        )
+                    raise TimeTreeAPIError(
+                        f"Login returned HTTP {resp.status}: {body_preview}"
+                    )
+
         except aiohttp.ClientError as err:
-            _LOGGER.error("TimeTree Enhanced: network error during login: %s", err)
             raise TimeTreeAPIError(f"Network error during login: {err}") from err
 
-        _LOGGER.debug(
-            "TimeTree Enhanced: login response HTTP %s – %.500s", resp.status, body
-        )
-
-        if resp.status in (401, 403):
-            raise TimeTreeAuthError("Invalid email or password")
-        if resp.status == 422:
-            raise TimeTreeAuthError(f"Login rejected (422): {body[:200]}")
-        if resp.status != 200:
-            raise TimeTreeAPIError(
-                f"Login returned HTTP {resp.status}: {body[:200]}"
-            )
-
-        # Session ID comes as a cookie
-        self._session_id = resp.cookies.get("_session_id")
-        if not self._session_id:
-            # Fall back to JSON body for older server versions
-            try:
-                data = json.loads(body)
-                self._session_id = (
-                    data.get("session_id")
-                    or (data.get("user") or {}).get("session_id")
-                    or (data.get("data") or {}).get("session_id")
-                )
-            except Exception:
-                pass
-
-        if not self._session_id:
-            _LOGGER.error(
-                "TimeTree Enhanced: no session_id found in cookies or body – body: %.500s", body
-            )
+        if not self.is_authenticated:
             raise TimeTreeAuthError("No session_id in login response")
 
         _LOGGER.debug("TimeTree Enhanced: login successful")
 
     async def get_calendars(self) -> list[dict[str, Any]]:
         """Return list of calendars the user has access to."""
-        data = await self._get("calendars")
-        _LOGGER.debug("TimeTree Enhanced: get_calendars response keys: %s", list(data.keys()))
+        data = await self._get("calendars", params={"since": 0})
+        _LOGGER.debug(
+            "TimeTree Enhanced: get_calendars keys: %s  snippet: %.300s",
+            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            str(data)[:300],
+        )
 
-        # Handle flat list, "calendars" key, or JSON:API "data" key
-        if isinstance(data, list):
-            raw = data
-        else:
-            raw = data.get("calendars") or data.get("data") or []
-
+        raw = data.get("calendars") or data.get("data") or (data if isinstance(data, list) else [])
         calendars = []
         for item in raw:
-            # JSON:API format: id at top level, name inside attributes
-            if "attributes" in item:
-                cal_id = str(item.get("id", ""))
-                cal_name = item["attributes"].get("name", cal_id)
-            else:
-                cal_id = str(item.get("id", ""))
-                cal_name = item.get("name", cal_id)
+            attrs = item.get("attributes") or item
+            cal_id = str(item.get("id", ""))
+            cal_name = attrs.get("name", cal_id)
             if cal_id:
                 calendars.append({"id": cal_id, "name": cal_name})
 
         _LOGGER.debug("TimeTree Enhanced: found %d calendars: %s", len(calendars), calendars)
         return calendars
 
-    async def get_all_events_sync(
-        self,
-        calendar_id: str,
-    ) -> list[dict[str, Any]]:
-        """Fetch ALL events (incl. recurring) via the sync endpoint with chunking.
-
-        Uses GET /calendar/{id}/events/sync (singular 'calendar') which returns
-        events in pages identified by a 'since' cursor until chunk==False.
-        """
-        events: list[dict[str, Any]] = []
-        since: str | None = None
-        max_chunks = 20  # guard against infinite loops
-
-        for _ in range(max_chunks):
-            params: dict[str, str] = {}
-            if since is not None:
-                params["since"] = since
-
-            data = await self._get(f"calendar/{calendar_id}/events/sync", params=params or None)
-            chunk_events = data.get("events") or []
-            events.extend(chunk_events)
-
-            if not data.get("chunk"):
-                break
-            since = data.get("since")
-            if not since:
-                break
-
-        return events
-
     async def get_calendar_members(self, calendar_id: str) -> list[dict[str, Any]]:
-        """Return members of a shared calendar with their label info.
-
-        Tries several API paths. Logs the raw response at DEBUG level so
-        users can report the exact format if all paths fail.
-        Each returned dict has 'name', 'label_name', and 'color' keys.
-        """
+        """Return members of a shared calendar with their label info."""
         paths = [
             f"calendars/{calendar_id}/members",
             f"calendars/{calendar_id}",
-            "calendars",  # find this calendar inside the full list
         ]
         for path in paths:
             try:
-                data = await self._get(path)
+                data = await self._get(path, params={"since": 0})
             except TimeTreeAPIError as err:
                 _LOGGER.debug("TimeTree Enhanced: members path /%s failed: %s", path, err)
                 continue
 
             _LOGGER.debug(
-                "TimeTree Enhanced: members API /%s → keys=%s  snippet=%.300s",
+                "TimeTree Enhanced: members /%s → keys=%s  snippet=%.400s",
                 path,
                 list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-                str(data)[:300],
+                str(data)[:400],
             )
 
-            # When we fetched the full calendars list, locate this calendar
-            if path == "calendars":
-                cal_list = data.get("calendars") or data.get("data") or (data if isinstance(data, list) else [])
-                data = next(
-                    (c for c in cal_list if str(c.get("id", "")) == calendar_id),
-                    {},
-                )
-
-            # Probe every common key that could hold the member list
             cal = data.get("calendar") or data.get("data") or data
             members_raw = (
                 data.get("members")
@@ -193,7 +159,6 @@ class TimeTreeAPI:
             )
 
             if not members_raw:
-                _LOGGER.debug("TimeTree Enhanced: no members key in /%s response", path)
                 continue
 
             result: list[dict[str, Any]] = []
@@ -226,11 +191,33 @@ class TimeTreeAPI:
                 )
                 return result
 
-        _LOGGER.debug(
-            "TimeTree Enhanced: could not find calendar members via API – "
-            "will derive from event labels instead"
-        )
+        _LOGGER.debug("TimeTree Enhanced: no member data found via API")
         return []
+
+    async def get_all_events_sync(self, calendar_id: str) -> list[dict[str, Any]]:
+        """Fetch ALL events (incl. recurring) via the sync endpoint with chunking."""
+        events: list[dict[str, Any]] = []
+        since: int | None = None
+        max_chunks = 20
+
+        for _ in range(max_chunks):
+            params: dict = {}
+            if since is not None:
+                params["since"] = since
+
+            data = await self._get(
+                f"calendar/{calendar_id}/events/sync",
+                params=params or None,
+            )
+            events.extend(data.get("events") or [])
+
+            if not data.get("chunk"):
+                break
+            since = data.get("since")
+            if not since:
+                break
+
+        return events
 
     async def get_upcoming_events(
         self,
@@ -260,69 +247,67 @@ class TimeTreeAPI:
     ) -> dict[str, Any]:
         """Create an event in TimeTree. Returns the created event dict."""
 
-        def _fmt_dt(dt: datetime) -> str:
-            return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        def _fmt_dt(dt: datetime) -> int:
+            """Return Unix milliseconds."""
+            return int(dt.astimezone(timezone.utc).timestamp() * 1000)
 
         def _fmt_date(dt: datetime) -> str:
             return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
-        # TimeTree expects plain date strings (YYYY-MM-DD) for all-day events
-        fmt = _fmt_date if all_day else _fmt_dt
-
         payload: dict[str, Any] = {
             "title": title,
             "all_day": all_day,
-            "start_at": fmt(start),
-            "end_at": fmt(end),
-            "description": description,
+            "start_at": _fmt_date(start) if all_day else _fmt_dt(start),
+            "end_at": _fmt_date(end) if all_day else _fmt_dt(end),
+            "note": description,
             "location": location,
+            "uuid": uuid.uuid4().hex,
         }
         if label_id is not None:
             payload["label_id"] = label_id
 
         return await self._post(f"calendars/{calendar_id}/events", payload)
 
-    def _auth_headers(self) -> dict[str, str]:
-        if not self._session_id:
-            raise TimeTreeAuthError("Not logged in – call login() first")
-        return {**HEADERS_BASE, "Cookie": f"_session_id={self._session_id}"}
-
     async def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         try:
-            resp = await self._session.get(
+            async with self._session.get(
                 f"{BASE_URL}/{path}",
-                headers=self._auth_headers(),
                 params=params,
-            )
+            ) as resp:
+                if resp.status == 401:
+                    raise TimeTreeAuthError("Session expired")
+                if resp.status != 200:
+                    try:
+                        body = await resp.json(content_type=None)
+                    except Exception:
+                        body = await resp.text()
+                    _LOGGER.debug(
+                        "TimeTree Enhanced: GET /%s HTTP %s — %.500s", path, resp.status, body
+                    )
+                    raise TimeTreeAPIError(
+                        f"GET /{path} returned HTTP {resp.status}: {str(body)[:200]}"
+                    )
+                return await resp.json(content_type=None)
         except aiohttp.ClientError as err:
             raise TimeTreeAPIError(f"Network error: {err}") from err
-
-        if resp.status == 401:
-            raise TimeTreeAuthError("Session expired")
-        if resp.status != 200:
-            body = await resp.text()
-            _LOGGER.debug("TimeTree Enhanced: GET /%s HTTP %s – %.500s", path, resp.status, body)
-            raise TimeTreeAPIError(f"GET /{path} returned HTTP {resp.status}: {body[:200]}")
-
-        return await resp.json(content_type=None)
 
     async def _post(self, path: str, payload: dict) -> dict[str, Any]:
         try:
-            resp = await self._session.post(
+            async with self._session.post(
                 f"{BASE_URL}/{path}",
                 json=payload,
-                headers=self._auth_headers(),
-            )
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status == 401:
+                    raise TimeTreeAuthError("Session expired")
+                if resp.status not in (200, 201):
+                    try:
+                        body = await resp.json(content_type=None)
+                    except Exception:
+                        body = await resp.text()
+                    raise TimeTreeAPIError(
+                        f"POST /{path} returned HTTP {resp.status}: {str(body)[:200]}"
+                    )
+                return await resp.json(content_type=None)
         except aiohttp.ClientError as err:
             raise TimeTreeAPIError(f"Network error: {err}") from err
-
-        if resp.status == 401:
-            raise TimeTreeAuthError("Session expired")
-        if resp.status not in (200, 201):
-            body = await resp.text()
-            _LOGGER.debug("TimeTree Enhanced: POST /%s HTTP %s – %.200s", path, resp.status, body)
-            raise TimeTreeAPIError(
-                f"POST /{path} returned HTTP {resp.status}: {body}"
-            )
-
-        return await resp.json(content_type=None)

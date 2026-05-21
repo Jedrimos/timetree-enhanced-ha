@@ -4,14 +4,15 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from yarl import URL
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import TimeTreeAPI, TimeTreeAPIError, TimeTreeAuthError
+from .api import BASE_URL, TimeTreeAPI, TimeTreeAPIError, TimeTreeAuthError
 from .const import (
     CONF_CALENDAR_ID,
     CONF_EMAIL,
@@ -34,8 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up TimeTree Enhanced from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    session = async_get_clientsession(hass)
-    api = TimeTreeAPI(session)
+    api = TimeTreeAPI()
 
     scan_interval: int = entry.options.get(
         CONF_SCAN_INTERVAL,
@@ -48,15 +48,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     calendar_id: str = entry.data[CONF_CALENDAR_ID]
 
-    # Persist session_id across HA restarts to avoid login rate-limiting (HTTP 429)
+    # Persist session cookie across HA restarts to avoid login rate-limiting (HTTP 429)
     store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_session")
     stored = await store.async_load() or {}
     if stored.get("session_id"):
-        api._session_id = stored["session_id"]
-        _LOGGER.debug("TimeTree Enhanced: restored session_id from storage")
+        api._session.cookie_jar.update_cookies(
+            {"_session_id": stored["session_id"]},
+            response_url=URL(BASE_URL),
+        )
+        _LOGGER.debug("TimeTree Enhanced: restored session cookie from storage")
 
     # Mutable container so _fetch() can write the timestamp and sensors can read it
     last_sync: dict[str, datetime | None] = {"time": None}
+
+    async def _save_session() -> None:
+        """Persist the current session cookie to storage."""
+        cookies = api._session.cookie_jar.filter_cookies(URL(BASE_URL))
+        cookie = cookies.get("_session_id")
+        if cookie:
+            await store.async_save({"session_id": cookie.value})
 
     async def _get_events() -> list[dict]:
         """Fetch upcoming events from TimeTree."""
@@ -70,9 +80,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return events
 
     async def _login_and_save() -> None:
-        """Login and persist the new session_id."""
+        """Login and persist the new session cookie."""
         await api.login(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
-        await store.async_save({"session_id": api._session_id})
+        await _save_session()
 
     async def _fetch() -> list[dict]:
         """Fetch events, logging in only when the session is missing or expired."""
@@ -108,7 +118,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     # Fetch the actual persons who are members of this shared calendar.
-    # These become the basis for per-person calendar entities (not event labels).
+    # These become the basis for per-person calendar entities.
     members: list[dict] = []
     try:
         members = await api.get_calendar_members(calendar_id)
@@ -144,8 +154,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
-        # Keep stored session_id so the next load can reuse it without re-login
+        data = hass.data[DOMAIN].pop(entry.entry_id)
+        await data["api"].close()
+        # Keep stored session cookie so the next load can reuse it without re-login
     return unload_ok
 
 
@@ -218,7 +229,8 @@ def _filter_events_in_range(
 def _parse_dt(value: str | int | float) -> datetime:
     """Parse ISO datetime string or Unix timestamp to a UTC-aware datetime."""
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=timezone.utc)
+        secs = value / 1000 if value > 1e10 else value
+        return datetime.fromtimestamp(secs, tz=timezone.utc)
     value = str(value)
     if len(value) == 10 and "T" not in value:
         return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
