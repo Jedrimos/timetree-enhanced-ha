@@ -226,9 +226,9 @@ class TimeTreeAPI:
                 )
                 return result
 
-        _LOGGER.warning(
-            "TimeTree Enhanced: could not find calendar members – "
-            "enable DEBUG logging for custom_components.timetree_enhanced to diagnose"
+        _LOGGER.debug(
+            "TimeTree Enhanced: could not find calendar members via API – "
+            "will derive from event labels instead"
         )
         return []
 
@@ -239,7 +239,7 @@ class TimeTreeAPI:
         days: int = 60,
         tz: str = "Europe/Berlin",
     ) -> list[dict[str, Any]]:
-        """Return upcoming events (fallback – does not include recurring events)."""
+        """Return upcoming events via the internal API."""
         data = await self._get(
             f"calendars/{calendar_id}/upcoming_events",
             params={"timezone": tz, "days": days},

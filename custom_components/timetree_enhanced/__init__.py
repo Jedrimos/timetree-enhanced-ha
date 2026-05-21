@@ -59,29 +59,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     last_sync: dict[str, datetime | None] = {"time": None}
 
     async def _get_events() -> list[dict]:
-        """Fetch events via sync endpoint (incl. recurring), fall back to upcoming_events."""
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=14)
-        end = now + timedelta(days=fetch_days)
-
-        try:
-            all_events = await api.get_all_events_sync(calendar_id)
-            # Filter locally to the desired window
-            events = _filter_events_in_range(all_events, start, end)
-            _LOGGER.debug(
-                "TimeTree Enhanced: %d/%d events via sync endpoint for %s",
-                len(events),
-                len(all_events),
-                calendar_id,
-            )
-            last_sync["time"] = datetime.now(timezone.utc)
-            return events
-        except TimeTreeAPIError as sync_err:
-            _LOGGER.warning(
-                "TimeTree Enhanced: sync endpoint failed (%s), falling back to upcoming_events",
-                sync_err,
-            )
-
+        """Fetch upcoming events from TimeTree."""
         events = await api.get_upcoming_events(calendar_id, days=fetch_days, tz=tz)
         _LOGGER.debug(
             "TimeTree Enhanced: %d events via upcoming_events for %s",
