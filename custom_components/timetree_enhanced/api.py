@@ -155,14 +155,20 @@ class TimeTreeAPI:
     ) -> dict[str, Any]:
         """Create an event in TimeTree. Returns the created event dict."""
 
-        def _fmt(dt: datetime) -> str:
+        def _fmt_dt(dt: datetime) -> str:
             return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        def _fmt_date(dt: datetime) -> str:
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+        # TimeTree expects plain date strings (YYYY-MM-DD) for all-day events
+        fmt = _fmt_date if all_day else _fmt_dt
 
         payload: dict[str, Any] = {
             "title": title,
             "all_day": all_day,
-            "start_at": _fmt(start),
-            "end_at": _fmt(end),
+            "start_at": fmt(start),
+            "end_at": fmt(end),
             "description": description,
             "location": location,
         }

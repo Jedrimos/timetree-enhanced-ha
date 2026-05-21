@@ -183,9 +183,6 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
 class TimeTreeEnhancedOptionsFlow(OptionsFlow):
     """Allow changing scan interval and fetch window without reinstalling."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self._config_entry = config_entry
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> dict:
@@ -198,13 +195,13 @@ class TimeTreeEnhancedOptionsFlow(OptionsFlow):
                 },
             )
 
-        current_interval = self._config_entry.options.get(
+        current_interval = self.config_entry.options.get(
             CONF_SCAN_INTERVAL,
-            self._config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
-        current_days = self._config_entry.options.get(
+        current_days = self.config_entry.options.get(
             CONF_FETCH_DAYS,
-            self._config_entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS),
+            self.config_entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS),
         )
 
         return self.async_show_form(
