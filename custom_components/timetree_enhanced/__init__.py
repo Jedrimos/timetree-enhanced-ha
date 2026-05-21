@@ -47,6 +47,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     calendar_id: str = entry.data[CONF_CALENDAR_ID]
 
+    # Mutable container so _fetch() can write the timestamp and sensors can read it
+    last_sync: dict[str, datetime | None] = {"time": None}
+
     async def _fetch() -> list[dict]:
         """Login + fetch all upcoming events including recurring ones."""
         try:
@@ -66,6 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         len(events),
                         calendar_id,
                     )
+                    last_sync["time"] = datetime.now(timezone.utc)
                     return events
             except TimeTreeAPIError:
                 _LOGGER.warning(
@@ -79,6 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 len(events),
                 calendar_id,
             )
+            last_sync["time"] = datetime.now(timezone.utc)
             return events
 
         except TimeTreeAuthError as err:
@@ -103,6 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "api": api,
         "calendar_id": calendar_id,
+        "last_sync": last_sync,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

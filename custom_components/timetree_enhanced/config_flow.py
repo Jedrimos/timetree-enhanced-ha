@@ -76,14 +76,6 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 await api.login(email, password)
                 calendars = await api.get_calendars()
-            except TimeTreeAuthError:
-                errors["base"] = "invalid_auth"
-            except TimeTreeAPIError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Unexpected error during TimeTree login")
-                errors["base"] = "unknown"
-            else:
                 if not calendars:
                     errors["base"] = "no_calendars"
                 else:
@@ -91,6 +83,15 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._password = password
                     self._calendars = calendars
                     return await self.async_step_calendar()
+            except TimeTreeAuthError as err:
+                _LOGGER.warning("TimeTree Enhanced: auth error – %s", err)
+                errors["base"] = "invalid_auth"
+            except TimeTreeAPIError as err:
+                _LOGGER.warning("TimeTree Enhanced: API error – %s", err)
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("TimeTree Enhanced: unexpected error during setup")
+                errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="user",
@@ -182,9 +183,6 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
 class TimeTreeEnhancedOptionsFlow(OptionsFlow):
     """Allow changing scan interval and fetch window without reinstalling."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self._config_entry = config_entry
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> dict:
@@ -197,13 +195,13 @@ class TimeTreeEnhancedOptionsFlow(OptionsFlow):
                 },
             )
 
-        current_interval = self._config_entry.options.get(
+        current_interval = self.config_entry.options.get(
             CONF_SCAN_INTERVAL,
-            self._config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
-        current_days = self._config_entry.options.get(
+        current_days = self.config_entry.options.get(
             CONF_FETCH_DAYS,
-            self._config_entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS),
+            self.config_entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS),
         )
 
         return self.async_show_form(

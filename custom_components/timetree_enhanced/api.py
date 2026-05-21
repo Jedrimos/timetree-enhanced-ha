@@ -1,6 +1,7 @@
 """Async TimeTree APP-API wrapper (session-based, no developer token needed)."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -43,13 +44,13 @@ class TimeTreeAPI:
                 headers=HEADERS_BASE,
                 allow_redirects=True,
             )
+            body = await resp.text()
         except aiohttp.ClientError as err:
             _LOGGER.error("TimeTree Enhanced: network error during login: %s", err)
             raise TimeTreeAPIError(f"Network error during login: {err}") from err
 
-        body = await resp.text()
         _LOGGER.debug(
-            "TimeTree Enhanced: login response HTTP %s – %.300s", resp.status, body
+            "TimeTree Enhanced: login response HTTP %s – %.500s", resp.status, body
         )
 
         if resp.status in (401, 403):
@@ -62,11 +63,10 @@ class TimeTreeAPI:
             )
 
         try:
-            data = await resp.json(content_type=None)
+            data = json.loads(body)
         except Exception as err:
             _LOGGER.error(
-                "TimeTree Enhanced: could not parse login JSON – %s – body: %.300s",
-                err, body,
+                "TimeTree Enhanced: login response not valid JSON – body: %.500s", body
             )
             raise TimeTreeAPIError(f"Login response not valid JSON: {err}") from err
 
@@ -78,8 +78,8 @@ class TimeTreeAPI:
         )
         if not self._session_id:
             _LOGGER.error(
-                "TimeTree Enhanced: no session_id in login response – keys: %s",
-                list(data.keys()),
+                "TimeTree Enhanced: no session_id found – response keys: %s – body: %.500s",
+                list(data.keys()), body,
             )
             raise TimeTreeAuthError("No session_id in login response")
 
@@ -88,7 +88,28 @@ class TimeTreeAPI:
     async def get_calendars(self) -> list[dict[str, Any]]:
         """Return list of calendars the user has access to."""
         data = await self._get("calendars")
-        return data.get("calendars", [])
+        _LOGGER.debug("TimeTree Enhanced: get_calendars response keys: %s", list(data.keys()))
+
+        # Handle flat list, "calendars" key, or JSON:API "data" key
+        if isinstance(data, list):
+            raw = data
+        else:
+            raw = data.get("calendars") or data.get("data") or []
+
+        calendars = []
+        for item in raw:
+            # JSON:API format: id at top level, name inside attributes
+            if "attributes" in item:
+                cal_id = str(item.get("id", ""))
+                cal_name = item["attributes"].get("name", cal_id)
+            else:
+                cal_id = str(item.get("id", ""))
+                cal_name = item.get("name", cal_id)
+            if cal_id:
+                calendars.append({"id": cal_id, "name": cal_name})
+
+        _LOGGER.debug("TimeTree Enhanced: found %d calendars: %s", len(calendars), calendars)
+        return calendars
 
     async def get_events_in_range(
         self,
@@ -134,14 +155,20 @@ class TimeTreeAPI:
     ) -> dict[str, Any]:
         """Create an event in TimeTree. Returns the created event dict."""
 
-        def _fmt(dt: datetime) -> str:
+        def _fmt_dt(dt: datetime) -> str:
             return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        def _fmt_date(dt: datetime) -> str:
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+        # TimeTree expects plain date strings (YYYY-MM-DD) for all-day events
+        fmt = _fmt_date if all_day else _fmt_dt
 
         payload: dict[str, Any] = {
             "title": title,
             "all_day": all_day,
-            "start_at": _fmt(start),
-            "end_at": _fmt(end),
+            "start_at": fmt(start),
+            "end_at": fmt(end),
             "description": description,
             "location": location,
         }

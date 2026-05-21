@@ -125,6 +125,12 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
         start_date: datetime,
         end_date: datetime,
     ) -> list[CalendarEvent]:
+        # Ensure bounds are timezone-aware (HA calendar card may pass naive datetimes)
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+
         result: list[CalendarEvent] = []
         for raw in self.coordinator.data or []:
             member, display_title = parse_member_and_title(raw)

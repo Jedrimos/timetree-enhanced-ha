@@ -7,7 +7,7 @@ Provides:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -15,11 +15,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
-from .const import CONF_CALENDAR_NAME, DOMAIN, NO_MEMBER
+from .const import CONF_CALENDAR_NAME, DOMAIN
 from .helpers import extract_unique_members, parse_member_and_title
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,18 +34,36 @@ async def async_setup_entry(
     coordinator: DataUpdateCoordinator = data["coordinator"]
     calendar_id: str = data["calendar_id"]
     calendar_name: str = entry.data.get(CONF_CALENDAR_NAME, "TimeTree")
+    last_sync: dict = data["last_sync"]
 
-    sensors: list[SensorEntity] = [
-        TimeTreeLastUpdatedSensor(coordinator, calendar_id, calendar_name)
-    ]
+    async_add_entities(
+        [TimeTreeLastUpdatedSensor(coordinator, calendar_id, calendar_name, last_sync)],
+        True,
+    )
 
-    if coordinator.data:
-        for member in extract_unique_members(coordinator.data):
-            sensors.append(
+    known_members: set[str] = set()
+
+    def _add_new_member_sensors(events: list[dict]) -> None:
+        new_sensors: list[SensorEntity] = []
+        for member in extract_unique_members(events):
+            if member in known_members:
+                continue
+            known_members.add(member)
+            new_sensors.append(
                 TimeTreeMemberCountSensor(coordinator, calendar_id, calendar_name, member)
             )
+        if new_sensors:
+            async_add_entities(new_sensors, True)
 
-    async_add_entities(sensors, True)
+    if coordinator.data:
+        _add_new_member_sensors(coordinator.data)
+
+    @callback
+    def _on_coordinator_update() -> None:
+        if coordinator.data:
+            _add_new_member_sensors(coordinator.data)
+
+    entry.async_on_unload(coordinator.async_add_listener(_on_coordinator_update))
 
 
 class TimeTreeLastUpdatedSensor(CoordinatorEntity, SensorEntity):
@@ -60,20 +78,16 @@ class TimeTreeLastUpdatedSensor(CoordinatorEntity, SensorEntity):
         coordinator: DataUpdateCoordinator,
         calendar_id: str,
         calendar_name: str,
+        last_sync: dict,
     ) -> None:
         super().__init__(coordinator)
+        self._last_sync = last_sync
         self._attr_name = f"{calendar_name} – Zuletzt synchronisiert"
         self._attr_unique_id = f"{DOMAIN}_{calendar_id}_last_updated"
 
     @property
     def native_value(self) -> datetime | None:
-        if self.coordinator.last_update_success:
-            return getattr(
-                self.coordinator,
-                "last_update_success_time",
-                datetime.now(tz=timezone.utc),
-            )
-        return None
+        return self._last_sync.get("time")
 
 
 class TimeTreeMemberCountSensor(CoordinatorEntity, SensorEntity):
