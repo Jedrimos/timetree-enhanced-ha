@@ -35,6 +35,13 @@ class TimeTreeAPI:
         self._session = session
         self._session_id: str | None = None
 
+    @property
+    def is_authenticated(self) -> bool:
+        return self._session_id is not None
+
+    def invalidate_session(self) -> None:
+        self._session_id = None
+
     async def login(self, email: str, password: str) -> None:
         """Obtain a session_id. Raises TimeTreeAuthError on failure."""
         device_uuid = uuid.uuid4().hex
@@ -111,21 +118,35 @@ class TimeTreeAPI:
         _LOGGER.debug("TimeTree Enhanced: found %d calendars: %s", len(calendars), calendars)
         return calendars
 
-    async def get_events_in_range(
+    async def get_all_events_sync(
         self,
         calendar_id: str,
-        start: datetime,
-        end: datetime,
-        tz: str = "Europe/Berlin",
     ) -> list[dict[str, Any]]:
-        """Fetch ALL events (incl. recurring) within an explicit date range."""
-        params = {
-            "start_at": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "end_at": end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "timezone": tz,
-        }
-        data = await self._get(f"calendars/{calendar_id}/events", params=params)
-        return data.get("events") or data.get("data") or []
+        """Fetch ALL events (incl. recurring) via the sync endpoint with chunking.
+
+        Uses GET /calendar/{id}/events/sync (singular 'calendar') which returns
+        events in pages identified by a 'since' cursor until chunk==False.
+        """
+        events: list[dict[str, Any]] = []
+        since: str | None = None
+        max_chunks = 20  # guard against infinite loops
+
+        for _ in range(max_chunks):
+            params: dict[str, str] = {}
+            if since is not None:
+                params["since"] = since
+
+            data = await self._get(f"calendar/{calendar_id}/events/sync", params=params or None)
+            chunk_events = data.get("events") or []
+            events.extend(chunk_events)
+
+            if not data.get("chunk"):
+                break
+            since = data.get("since")
+            if not since:
+                break
+
+        return events
 
     async def get_upcoming_events(
         self,
