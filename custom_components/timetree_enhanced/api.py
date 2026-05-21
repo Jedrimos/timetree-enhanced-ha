@@ -194,6 +194,29 @@ class TimeTreeAPI:
         _LOGGER.debug("TimeTree Enhanced: no member data found via API")
         return []
 
+    async def get_calendar_labels(self, calendar_id: str) -> list[dict[str, Any]]:
+        """Return labels defined for a calendar with name, id and hex color."""
+        data = await self._get(f"calendar/{calendar_id}/labels")
+        raw = data.get("calendar_labels") or []
+        result: list[dict[str, Any]] = []
+        for lbl in raw:
+            attrs = lbl.get("attributes") or lbl
+            name = (attrs.get("name") or "").strip()
+            color_val = attrs.get("color") or attrs.get("color_name") or ""
+            if isinstance(color_val, int):
+                color = f"#{color_val:06x}"
+            else:
+                color = str(color_val).strip()
+            label_id = lbl.get("id") or attrs.get("id")
+            if name:
+                result.append({"id": label_id, "name": name, "color": color})
+        _LOGGER.debug(
+            "TimeTree Enhanced: get_calendar_labels → %d labels: %s",
+            len(result),
+            [l["name"] for l in result],
+        )
+        return result
+
     async def get_all_events_sync(self, calendar_id: str) -> list[dict[str, Any]]:
         """Fetch ALL events (incl. recurring) via the sync endpoint with chunking."""
         events: list[dict[str, Any]] = []
