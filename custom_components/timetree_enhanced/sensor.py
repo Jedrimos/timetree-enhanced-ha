@@ -15,12 +15,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import CONF_CALENDAR_NAME, DOMAIN
-from .helpers import extract_unique_members, parse_member_and_title
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,35 +34,24 @@ async def async_setup_entry(
     calendar_id: str = data["calendar_id"]
     calendar_name: str = entry.data.get(CONF_CALENDAR_NAME, "TimeTree")
     last_sync: dict = data["last_sync"]
+    members: list[dict] = data.get("members", [])
 
-    async_add_entities(
-        [TimeTreeLastUpdatedSensor(coordinator, calendar_id, calendar_name, last_sync)],
-        True,
-    )
+    entities: list[SensorEntity] = [
+        TimeTreeLastUpdatedSensor(coordinator, calendar_id, calendar_name, last_sync)
+    ]
 
-    known_members: set[str] = set()
-
-    def _add_new_member_sensors(events: list[dict]) -> None:
-        new_sensors: list[SensorEntity] = []
-        for member in extract_unique_members(events):
-            if member in known_members:
-                continue
-            known_members.add(member)
-            new_sensors.append(
-                TimeTreeMemberCountSensor(coordinator, calendar_id, calendar_name, member)
+    for member in members:
+        entities.append(
+            TimeTreeMemberCountSensor(
+                coordinator=coordinator,
+                calendar_id=calendar_id,
+                calendar_name=calendar_name,
+                member_name=member["name"],
+                member_label=member["label_name"],
             )
-        if new_sensors:
-            async_add_entities(new_sensors, True)
+        )
 
-    if coordinator.data:
-        _add_new_member_sensors(coordinator.data)
-
-    @callback
-    def _on_coordinator_update() -> None:
-        if coordinator.data:
-            _add_new_member_sensors(coordinator.data)
-
-    entry.async_on_unload(coordinator.async_add_listener(_on_coordinator_update))
+    async_add_entities(entities, True)
 
 
 class TimeTreeLastUpdatedSensor(CoordinatorEntity, SensorEntity):
@@ -91,7 +79,7 @@ class TimeTreeLastUpdatedSensor(CoordinatorEntity, SensorEntity):
 
 
 class TimeTreeMemberCountSensor(CoordinatorEntity, SensorEntity):
-    """Number of upcoming events for one member."""
+    """Number of upcoming events for one calendar member, matched by label name."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:calendar-account"
@@ -103,22 +91,32 @@ class TimeTreeMemberCountSensor(CoordinatorEntity, SensorEntity):
         coordinator: DataUpdateCoordinator,
         calendar_id: str,
         calendar_name: str,
-        member: str,
+        member_name: str,
+        member_label: str,
     ) -> None:
         super().__init__(coordinator)
-        self._member = member
-        self._attr_name = f"{calendar_name} – {member} (Anzahl)"
+        self._member_name = member_name
+        self._member_label = member_label
+        self._attr_name = f"{calendar_name} – {member_name} (Anzahl)"
         self._attr_unique_id = (
-            f"{DOMAIN}_{calendar_id}_count_{member.lower().replace(' ', '_')}"
+            f"{DOMAIN}_{calendar_id}_count_{member_name.lower().replace(' ', '_')}"
         )
 
     @property
     def native_value(self) -> int:
         events = self.coordinator.data or []
         return sum(
-            1 for e in events if parse_member_and_title(e)[0] == self._member
+            1 for e in events
+            if _event_label_name(e).lower() == self._member_label.lower()
         )
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"member": self._member}
+        return {"member": self._member_name, "member_label": self._member_label}
+
+
+def _event_label_name(event: dict) -> str:
+    label = event.get("label") or {}
+    if isinstance(label, dict):
+        return (label.get("name") or "").strip()
+    return ""

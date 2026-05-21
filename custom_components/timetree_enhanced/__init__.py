@@ -129,11 +129,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await coordinator.async_config_entry_first_refresh()
 
+    # Fetch the actual persons who are members of this shared calendar.
+    # These become the basis for per-person calendar entities (not event labels).
+    members: list[dict] = []
+    try:
+        members = await api.get_calendar_members(calendar_id)
+        _LOGGER.info(
+            "TimeTree Enhanced: %d calendar members found: %s",
+            len(members),
+            [m["name"] for m in members],
+        )
+    except Exception:
+        _LOGGER.debug("TimeTree Enhanced: could not fetch calendar members")
+
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
         "api": api,
         "calendar_id": calendar_id,
         "last_sync": last_sync,
+        "members": members,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
