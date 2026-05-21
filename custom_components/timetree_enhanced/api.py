@@ -180,8 +180,17 @@ class TimeTreeAPI:
                     if isinstance(label, dict)
                     else ""
                 )
+                color = (
+                    (label.get("color") or label.get("color_name") or "").strip()
+                    if isinstance(label, dict)
+                    else ""
+                )
                 if name:
-                    result.append({"name": name, "label_name": label_name or name})
+                    result.append({
+                        "name": name,
+                        "label_name": label_name or name,
+                        "color": color,
+                    })
 
             if result:
                 _LOGGER.debug(

@@ -51,6 +51,8 @@ async def async_setup_entry(
     ]
 
     for idx, member in enumerate(members):
+        # Use the color from the TimeTree label; fall back to a rotating palette
+        color = member.get("color") or MEMBER_COLORS[idx % len(MEMBER_COLORS)]
         entities.append(
             TimeTreeMemberCalendar(
                 coordinator=coordinator,
@@ -59,14 +61,15 @@ async def async_setup_entry(
                 calendar_name=calendar_name,
                 member_name=member["name"],
                 member_label=member["label_name"],
-                color=MEMBER_COLORS[idx % len(MEMBER_COLORS)],
+                color=color,
                 tz=tz,
             )
         )
         _LOGGER.debug(
-            "TimeTree Enhanced: member calendar → %s (label: %s)",
+            "TimeTree Enhanced: member calendar → %s (label: %s, color: %s)",
             member["name"],
             member["label_name"],
+            color,
         )
 
     async_add_entities(entities, True)
@@ -117,7 +120,9 @@ class TimeTreeBaseCalendar(CoordinatorEntity, CalendarEntity):
         for raw in self.coordinator.data or []:
             if not self._event_belongs(raw):
                 continue
-            display_title = (raw.get("title") or "").strip() or "(Kein Titel)"
+            raw_title = (raw.get("title") or "").strip() or "(Kein Titel)"
+            label_name = _event_label_name(raw)
+            display_title = f"{label_name}: {raw_title}" if label_name else raw_title
             cal_event = _raw_to_calendar_event(raw, display_title)
             if cal_event is None:
                 continue
