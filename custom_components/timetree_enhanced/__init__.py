@@ -21,6 +21,7 @@ from .const import (
     CONF_SCAN_INTERVAL,
     CONF_TIMEZONE,
     DEFAULT_FETCH_DAYS,
+    DEFAULT_LABEL_NAMES,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_TIMEZONE,
     DOMAIN,
@@ -117,22 +118,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await coordinator.async_config_entry_first_refresh()
 
-    # Fetch the actual persons who are members of this shared calendar.
-    # These become the basis for per-person calendar entities.
+    # Member discovery: try three sources in order of reliability.
     members: list[dict] = []
+
+    # 1. Calendar members endpoint (email-invited people)
     try:
         members = await api.get_calendar_members(calendar_id)
     except Exception:
         _LOGGER.debug("TimeTree Enhanced: member fetch raised an exception")
 
-    # Fallback: if the API didn't return member info, derive members from
-    # the unique labels found in the current events window.
+    # 2. Calendar labels endpoint — returns all defined labels with name & color
+    if not members:
+        try:
+            labels = await api.get_calendar_labels(calendar_id)
+            members = [
+                {"name": lbl["name"], "label_name": lbl["name"], "color": lbl["color"]}
+                for lbl in labels
+                if lbl["name"].lower() not in DEFAULT_LABEL_NAMES
+            ]
+            if members:
+                _LOGGER.info(
+                    "TimeTree Enhanced: %d members from labels endpoint: %s",
+                    len(members),
+                    [m["name"] for m in members],
+                )
+        except Exception:
+            _LOGGER.debug("TimeTree Enhanced: labels fetch raised an exception")
+
+    # 3. Last resort: derive from unique labels on future events
     if not members and coordinator.data:
         members = _members_from_event_labels(coordinator.data)
         if members:
             _LOGGER.info(
                 "TimeTree Enhanced: derived %d members from event labels "
-                "(API had no member data): %s",
+                "(API had no label data): %s",
                 len(members),
                 [m["name"] for m in members],
             )
