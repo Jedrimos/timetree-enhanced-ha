@@ -224,7 +224,11 @@ def _expand_event(ev: dict, window_start: datetime, window_end: datetime) -> lis
     """
     import re as _re
 
-    rrule_raw: str = (ev.get("recurrences") or ev.get("recurrence") or ev.get("rrule") or "").strip()
+    _rrule_val = ev.get("recurrences") or ev.get("recurrence") or ev.get("rrule") or ""
+    if isinstance(_rrule_val, list):
+        rrule_raw = " ".join(str(r) for r in _rrule_val).strip()
+    else:
+        rrule_raw = str(_rrule_val).strip()
     if not rrule_raw:
         return [ev]
 
