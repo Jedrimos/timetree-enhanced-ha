@@ -176,36 +176,42 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-_CATEGORY_LABEL_KEYWORDS = {
-    "geburtstag", "birthday", "urlaub", "vacation", "feiertag", "holiday",
-    "arbeit", "work", "job", "bank", "schule", "school", "arzt", "doctor",
-    "sport", "einkauf", "shopping", "termin", "appointment",
-    "ebay", "amazon", "müll", "garbage", "sonstiges", "sonstige", "misc",
-}
-
-
 def _members_from_event_labels(events: list[dict]) -> list[dict]:
-    """Derive a member list from the unique label names seen in events.
+    """Derive a member list from labels on UPCOMING events only.
 
-    Skips labels that look like categories (known keywords) rather than
-    person names. Each returned dict has 'name', 'label_name', 'color'.
+    Only labels that appear on at least one future event are included.
+    This ensures we don't create empty calendars for labels that only
+    had past events.  Each returned dict has 'name', 'label_name', 'color'.
     """
+    now_ts = datetime.now(timezone.utc).timestamp()
     seen: dict[str, dict] = {}
+
     for ev in events:
+        # Only consider events that start in the future
+        start_raw = ev.get("start_at") or ev.get("dt_start")
+        if start_raw is None:
+            continue
+        try:
+            if isinstance(start_raw, (int, float)):
+                ev_start_ts = float(start_raw)
+            else:
+                val = str(start_raw).replace("Z", "+00:00")
+                ev_start_ts = datetime.fromisoformat(val).timestamp()
+            if ev_start_ts < now_ts:
+                continue
+        except Exception:
+            continue
+
         label = ev.get("label") or {}
         if not isinstance(label, dict):
             continue
         name = (label.get("name") or "").strip()
         if not name:
             continue
-        if name.lower() in _CATEGORY_LABEL_KEYWORDS:
-            continue
-        # Skip labels with spaces that look like sentences (category phrases)
-        if len(name.split()) > 2:
-            continue
         if name not in seen:
             color = (label.get("color") or label.get("color_name") or "").strip()
             seen[name] = {"name": name, "label_name": name, "color": color}
+
     return sorted(seen.values(), key=lambda m: m["name"])
 
 
