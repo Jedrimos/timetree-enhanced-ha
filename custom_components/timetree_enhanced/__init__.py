@@ -84,7 +84,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("TimeTree Enhanced: could not fetch labels for event enrichment")
 
         now = datetime.now(timezone.utc)
-        end = now + timedelta(days=fetch_days)
+        # Use start of today so multi-day events that began earlier today are included
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = today + timedelta(days=fetch_days)
 
         enriched: list[dict] = []
         for ev in all_events:
@@ -95,10 +97,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ev = {**ev, "label": lbl}
 
             # Expand recurring events into individual occurrences within the window
-            for occurrence in _expand_event(ev, now, end):
+            for occurrence in _expand_event(ev, today, end):
                 enriched.append(occurrence)
 
-        events = _filter_events_in_range(enriched, now, end)
+        events = _filter_events_in_range(enriched, today, end)
         _LOGGER.debug(
             "TimeTree Enhanced: %d events in window (%d raw, %d after expansion) for %s",
             len(events),
