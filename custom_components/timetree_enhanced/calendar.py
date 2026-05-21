@@ -308,10 +308,11 @@ def _as_datetime(dt: datetime | date) -> datetime:
 
 
 def _parse_datetime(raw: str | int | float) -> datetime | None:
-    """Parse ISO string or Unix timestamp (int/float) to UTC-aware datetime."""
+    """Parse ISO string or Unix timestamp (int/float, ms or s) to UTC-aware datetime."""
     try:
         if isinstance(raw, (int, float)):
-            return datetime.fromtimestamp(raw, tz=timezone.utc)
+            secs = raw / 1000 if raw > 1e10 else raw
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
         raw = str(raw).replace("Z", "+00:00")
         dt = datetime.fromisoformat(raw)
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -320,10 +321,11 @@ def _parse_datetime(raw: str | int | float) -> datetime | None:
 
 
 def _parse_date(raw: str | int | float) -> date | None:
-    """Parse ISO date string or Unix timestamp to a date."""
+    """Parse ISO date string or Unix timestamp (ms or s) to a date."""
     try:
         if isinstance(raw, (int, float)):
-            return datetime.fromtimestamp(raw, tz=timezone.utc).date()
+            secs = raw / 1000 if raw > 1e10 else raw
+            return datetime.fromtimestamp(secs, tz=timezone.utc).date()
         raw = str(raw)
         if "T" in raw or " " in raw:
             dt = _parse_datetime(raw)
