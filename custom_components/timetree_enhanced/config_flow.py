@@ -8,7 +8,6 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.core import callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -71,8 +70,7 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
             email = user_input[CONF_EMAIL].strip()
             password = user_input[CONF_PASSWORD]
 
-            session = async_get_clientsession(self.hass)
-            api = TimeTreeAPI(session)
+            api = TimeTreeAPI()
             try:
                 await api.login(email, password)
                 calendars = await api.get_calendars()
@@ -92,6 +90,8 @@ class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("TimeTree Enhanced: unexpected error during setup")
                 errors["base"] = "unknown"
+            finally:
+                await api.close()
 
         return self.async_show_form(
             step_id="user",
