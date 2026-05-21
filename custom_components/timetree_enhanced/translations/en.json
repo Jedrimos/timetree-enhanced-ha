@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "TimeTree Pro – Sign In",
+        "title": "TimeTree Enhanced – Sign In",
         "description": "Enter your TimeTree credentials.",
         "data": {
           "email": "E-Mail",
@@ -33,7 +33,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "TimeTree Pro – Options",
+        "title": "TimeTree Enhanced – Options",
         "data": {
           "scan_interval": "Sync interval (minutes)",
           "fetch_days": "Fetch window (days)"

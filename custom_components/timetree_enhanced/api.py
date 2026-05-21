@@ -33,10 +33,6 @@ class TimeTreeAPI:
         self._session = session
         self._session_id: str | None = None
 
-    # ------------------------------------------------------------------
-    # Auth
-    # ------------------------------------------------------------------
-
     async def login(self, email: str, password: str) -> None:
         """Obtain a session_id. Raises TimeTreeAuthError on failure."""
         try:
@@ -58,20 +54,28 @@ class TimeTreeAPI:
         if not self._session_id:
             raise TimeTreeAuthError("No session_id in login response")
 
-        _LOGGER.debug("TimeTree login successful, session_id obtained")
-
-    # ------------------------------------------------------------------
-    # Calendars
-    # ------------------------------------------------------------------
+        _LOGGER.debug("TimeTree Enhanced: login successful")
 
     async def get_calendars(self) -> list[dict[str, Any]]:
         """Return list of calendars the user has access to."""
         data = await self._get("calendars")
         return data.get("calendars", [])
 
-    # ------------------------------------------------------------------
-    # Events
-    # ------------------------------------------------------------------
+    async def get_events_in_range(
+        self,
+        calendar_id: str,
+        start: datetime,
+        end: datetime,
+        tz: str = "Europe/Berlin",
+    ) -> list[dict[str, Any]]:
+        """Fetch ALL events (incl. recurring) within an explicit date range."""
+        params = {
+            "start_at": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "end_at": end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "timezone": tz,
+        }
+        data = await self._get(f"calendars/{calendar_id}/events", params=params)
+        return data.get("events") or data.get("data") or []
 
     async def get_upcoming_events(
         self,
@@ -80,7 +84,7 @@ class TimeTreeAPI:
         days: int = 60,
         tz: str = "Europe/Berlin",
     ) -> list[dict[str, Any]]:
-        """Return upcoming events for *calendar_id* (next *days* days)."""
+        """Return upcoming events (fallback – does not include recurring events)."""
         data = await self._get(
             f"calendars/{calendar_id}/upcoming_events",
             params={"timezone": tz, "days": days},
@@ -117,18 +121,12 @@ class TimeTreeAPI:
 
         return await self._post(f"calendars/{calendar_id}/events", payload)
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _auth_headers(self) -> dict[str, str]:
         if not self._session_id:
             raise TimeTreeAuthError("Not logged in – call login() first")
         return {**HEADERS_BASE, "Session-Id": self._session_id}
 
-    async def _get(
-        self, path: str, params: dict | None = None
-    ) -> dict[str, Any]:
+    async def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         try:
             resp = await self._session.get(
                 f"{BASE_URL}/{path}",

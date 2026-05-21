@@ -2,41 +2,32 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.components.calendar import CalendarEvent
 
-from .const import DEFAULT_LABEL_NAMES, DISPLAY_SEPARATOR, NO_MEMBER
+from .const import DEFAULT_LABEL_NAMES, DISPLAY_SEPARATOR, HOLIDAY_LABEL_KEYWORDS, NO_MEMBER
 
 _LOGGER = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Member / title detection
-# ---------------------------------------------------------------------------
 
 def parse_member_and_title(event: dict[str, Any]) -> tuple[str, str]:
     """
     Return (member_name, display_title) for a raw TimeTree event dict.
 
-    Strategy
-    --------
-    1. If the title contains a "Name: rest" prefix → member = Name,
-       display = "Name · rest"
-    2. Else if the event label has a non-default name → member = label_name,
-       display = "label_name · title"
-    3. Else → member = NO_MEMBER ("Sonstige"), display = original title
+    Strategy:
+    1. "Name: rest" prefix in title → member=Name, display="Name · rest"
+    2. Non-default label name → member=label_name, display="label_name · title"
+    3. Fallback → member=NO_MEMBER, display=original title
     """
     raw_title = (event.get("title") or "").strip()
 
-    # --- Strategy 1: colon-prefix in title ---
     if ":" in raw_title:
         colon_idx = raw_title.index(":")
         potential_name = raw_title[:colon_idx].strip()
-        rest = raw_title[colon_idx + 1 :].strip()
+        rest = raw_title[colon_idx + 1:].strip()
 
-        # Sanity: short name, no digits at start, no nested colons
         if (
             potential_name
             and len(potential_name) <= 30
@@ -48,7 +39,6 @@ def parse_member_and_title(event: dict[str, Any]) -> tuple[str, str]:
             )
             return potential_name, display
 
-    # --- Strategy 2: label name ---
     label = event.get("label") or {}
     if isinstance(label, dict):
         label_name = (label.get("name") or "").strip()
@@ -61,12 +51,11 @@ def parse_member_and_title(event: dict[str, Any]) -> tuple[str, str]:
         )
         return label_name, display
 
-    # --- Strategy 3: fallback ---
     return NO_MEMBER, raw_title
 
 
 def extract_unique_members(events: list[dict[str, Any]]) -> list[str]:
-    """Return sorted list of unique member names found in *events* (NO_MEMBER excluded)."""
+    """Return sorted list of unique member names found in events (NO_MEMBER excluded)."""
     members: set[str] = set()
     for event in events:
         member, _ = parse_member_and_title(event)
@@ -75,19 +64,18 @@ def extract_unique_members(events: list[dict[str, Any]]) -> list[str]:
     return sorted(members)
 
 
-# ---------------------------------------------------------------------------
-# Event → CalendarEvent conversion
-# ---------------------------------------------------------------------------
+def is_holiday(event: dict[str, Any]) -> bool:
+    """Return True if the event looks like a public holiday based on its label."""
+    label = event.get("label") or {}
+    label_name = (label.get("name") or "").lower()
+    return any(kw in label_name for kw in HOLIDAY_LABEL_KEYWORDS)
+
 
 def event_to_calendar_event(
     event: dict[str, Any],
     display_title: str,
 ) -> CalendarEvent | None:
-    """
-    Convert a raw TimeTree event dict to a HA CalendarEvent.
-
-    Returns None if the event data is malformed / unparseable.
-    """
+    """Convert a raw TimeTree event dict to a HA CalendarEvent."""
     try:
         uid = str(event.get("id", ""))
         all_day: bool = bool(event.get("all_day", False))
@@ -103,6 +91,17 @@ def event_to_calendar_event(
             end_dt = _parse_date(end_raw)
             if start_dt is None or end_dt is None:
                 return None
+
+            # Normalise: TimeTree may return datetime objects for all_day events
+            if isinstance(start_dt, datetime):
+                start_dt = start_dt.date()
+            if isinstance(end_dt, datetime):
+                end_dt = end_dt.date()
+
+            # HA expects exclusive end; if equal add one day
+            if end_dt <= start_dt:
+                end_dt = start_dt + timedelta(days=1)
+
             return CalendarEvent(
                 summary=display_title or "(Kein Titel)",
                 start=start_dt,
@@ -116,9 +115,7 @@ def event_to_calendar_event(
             end_dt = _parse_datetime(end_raw)
             if start_dt is None or end_dt is None:
                 return None
-            # Ensure end > start (TimeTree sometimes sends equal times for 0-min events)
             if end_dt <= start_dt:
-                from datetime import timedelta
                 end_dt = start_dt + timedelta(minutes=30)
             return CalendarEvent(
                 summary=display_title or "(Kein Titel)",
@@ -137,7 +134,6 @@ def event_to_calendar_event(
 def _parse_datetime(raw: str) -> datetime | None:
     """Parse ISO-8601 datetime string → timezone-aware datetime (UTC)."""
     try:
-        # Strip trailing Z, replace with +00:00 for fromisoformat compatibility
         raw = raw.replace("Z", "+00:00")
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
@@ -149,7 +145,7 @@ def _parse_datetime(raw: str) -> datetime | None:
 
 
 def _parse_date(raw: str) -> date | None:
-    """Parse a date-only string (YYYY-MM-DD) or full ISO datetime → date."""
+    """Parse date-only string (YYYY-MM-DD) or full ISO datetime → date."""
     try:
         if "T" in raw or " " in raw:
             dt = _parse_datetime(raw)

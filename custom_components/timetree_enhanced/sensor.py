@@ -1,8 +1,8 @@
-"""Sensor platform for TimeTree Pro.
+"""Sensor platform for TimeTree Enhanced.
 
 Provides:
-  • sensor.timetree_<name>_last_updated   – timestamp of last successful sync
-  • sensor.timetree_<name>_<member>_count – upcoming event count per member
+  • sensor.timetree_enhanced_<name>_zuletzt_synchronisiert  – last sync timestamp
+  • sensor.timetree_enhanced_<name>_<member>_anzahl         – event count per member
 """
 from __future__ import annotations
 
@@ -39,13 +39,10 @@ async def async_setup_entry(
         TimeTreeLastUpdatedSensor(coordinator, calendar_id, calendar_name)
     ]
 
-    # One event-count sensor per member (discovered from first data)
     if coordinator.data:
         for member in extract_unique_members(coordinator.data):
             sensors.append(
-                TimeTreeMemberCountSensor(
-                    coordinator, calendar_id, calendar_name, member
-                )
+                TimeTreeMemberCountSensor(coordinator, calendar_id, calendar_name, member)
             )
 
     async_add_entities(sensors, True)
@@ -71,7 +68,11 @@ class TimeTreeLastUpdatedSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> datetime | None:
         if self.coordinator.last_update_success:
-            return self.coordinator.last_update_success_time or datetime.now(tz=timezone.utc)
+            return getattr(
+                self.coordinator,
+                "last_update_success_time",
+                datetime.now(tz=timezone.utc),
+            )
         return None
 
 
@@ -101,9 +102,7 @@ class TimeTreeMemberCountSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> int:
         events = self.coordinator.data or []
         return sum(
-            1
-            for e in events
-            if parse_member_and_title(e)[0] == self._member
+            1 for e in events if parse_member_and_title(e)[0] == self._member
         )
 
     @property

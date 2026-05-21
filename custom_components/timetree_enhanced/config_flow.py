@@ -1,10 +1,9 @@
-"""Config flow for TimeTree Pro."""
+"""Config flow for TimeTree Enhanced."""
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-import aiohttp
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
@@ -53,8 +52,8 @@ TIMEZONES = [
 ]
 
 
-class TimeTreeProConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the initial setup flow for TimeTree Pro."""
+class TimeTreeEnhancedConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle the initial setup flow for TimeTree Enhanced."""
 
     VERSION = 1
 
@@ -62,10 +61,6 @@ class TimeTreeProConfigFlow(ConfigFlow, domain=DOMAIN):
         self._email: str = ""
         self._password: str = ""
         self._calendars: list[dict] = []
-
-    # ------------------------------------------------------------------
-    # Step 1 – Credentials
-    # ------------------------------------------------------------------
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -112,24 +107,17 @@ class TimeTreeProConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ------------------------------------------------------------------
-    # Step 2 – Calendar selection + options
-    # ------------------------------------------------------------------
-
     async def async_step_calendar(
         self, user_input: dict[str, Any] | None = None
     ) -> dict:
         errors: dict[str, str] = {}
 
-        calendar_options = {
-            c["id"]: c.get("name", c["id"]) for c in self._calendars
-        }
+        calendar_options = {c["id"]: c.get("name", c["id"]) for c in self._calendars}
 
         if user_input is not None:
             cal_id: str = user_input[CONF_CALENDAR_ID]
             cal_name: str = calendar_options.get(cal_id, cal_id)
 
-            # Avoid duplicate entries for the same calendar
             await self.async_set_unique_id(f"{DOMAIN}_{cal_id}")
             self._abort_if_unique_id_configured()
 
@@ -185,17 +173,13 @@ class TimeTreeProConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={"calendar_count": str(len(self._calendars))},
         )
 
-    # ------------------------------------------------------------------
-    # Options flow (accessible via "Konfigurieren" in the integration UI)
-    # ------------------------------------------------------------------
-
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        return TimeTreeProOptionsFlow(config_entry)
+        return TimeTreeEnhancedOptionsFlow(config_entry)
 
 
-class TimeTreeProOptionsFlow(OptionsFlow):
+class TimeTreeEnhancedOptionsFlow(OptionsFlow):
     """Allow changing scan interval and fetch window without reinstalling."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:

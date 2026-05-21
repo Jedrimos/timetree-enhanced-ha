@@ -1,20 +1,24 @@
-# TimeTree Pro für Home Assistant
+# TimeTree Enhanced für Home Assistant
 
-Verbesserte TimeTree-Integration mit **pro-Mitglied-Kalendern**, **Label-Erkennung** und vollem Write-Support.
+Verbesserte TimeTree-Integration mit **pro-Mitglied-Kalendern**, **wiederkehrenden Terminen (Geburtstage, Jahrestage)**, **Label-Erkennung** und vollem Write-Support.
 
 ---
 
 ## Unterschiede zur Original-Integration
 
-| Feature | Original | TimeTree Pro |
+| Feature | Original | TimeTree Enhanced |
 |---|---|---|
 | Kalender-Entities | 1 (alles gemischt) | 1 pro Mitglied + 1 „Alle" |
 | Titelformat | roher Titel | `Mitglied · Termin` |
+| Wiederkehrende Termine | ✗ | ✓ (Geburtstage, Jahrestage) |
+| Ganztags-Events | teils fehlerhaft | korrekt normalisiert |
+| Feiertage | ✗ | korrekt im „Alle"-Kalender |
 | Mitglieder-Erkennung | – | Präfix `Name:` + Label-Fallback |
 | Neue Mitglieder | Neustart nötig | automatisch erkannt |
 | Event erstellen | ✓ | ✓ (Mitglied wird auto-vorgesetzt) |
-| Sensoren | last_updated | last_updated + Anzahl pro Mitglied |
-| Optionen-Flow | Intervall-Slider | Intervall + Vorschauzeitraum |
+| Sensoren | – | last_updated + Anzahl pro Mitglied |
+| Zeit-Attribute | – | next_event_time, next_event_date, … |
+| Optionen-Flow | – | Intervall + Vorschauzeitraum |
 
 ---
 
@@ -22,19 +26,19 @@ Verbesserte TimeTree-Integration mit **pro-Mitglied-Kalendern**, **Label-Erkennu
 
 ### HACS (empfohlen)
 1. HACS → Integrationen → ⋮ → Benutzerdefinierte Repositories
-2. URL dieses Repos eingeben, Kategorie: Integration
-3. „TimeTree Pro" suchen und herunterladen
+2. URL: `https://github.com/jedrimos/timetree-enhanced-ha` → Kategorie: **Integration**
+3. „TimeTree Enhanced" suchen und herunterladen
 4. Home Assistant neu starten
 
 ### Manuell
-1. Ordner `custom_components/timetree_pro` in `/config/custom_components/` kopieren
+1. Ordner `custom_components/timetree_enhanced` nach `/config/custom_components/` kopieren
 2. Restart
 
 ---
 
 ## Einrichtung
 
-**Einstellungen → Geräte & Dienste → + Integration hinzufügen → TimeTree Pro**
+**Einstellungen → Geräte & Dienste → + Integration hinzufügen → TimeTree Enhanced**
 
 1. E-Mail + Passwort eingeben
 2. Kalender aus der Liste wählen
@@ -46,7 +50,7 @@ Verbesserte TimeTree-Integration mit **pro-Mitglied-Kalendern**, **Label-Erkennu
 
 ### Strategie 1 – Name-Präfix im Titel (Priorität)
 
-Ihr schreibt Termine in der Form `Mama: Zahnarzt` → die Integration erkennt `Mama` als Mitglied und zeigt den Termin als **`Mama · Zahnarzt`** an.
+Termine in der Form `Mama: Zahnarzt` → Integration erkennt `Mama` als Mitglied und zeigt den Termin als **`Mama · Zahnarzt`** an.
 
 Der Termin erscheint:
 - im Kalender **„Familienkalender – Mama"**
@@ -62,9 +66,11 @@ Tauchen nur im **„Alle"**-Kalender auf, nicht in einem Mitglieder-Kalender.
 
 ---
 
-## Neue Mitglieder – kein Neustart nötig
+## Wiederkehrende Termine (Geburtstage, Jahrestage)
 
-Wenn ein neuer Name zum ersten Mal in einem Termin auftaucht (z.B. bei einem Neuhaushaltsmitglied), wird **automatisch** eine neue Kalender-Entity erstellt – ohne Neustart.
+Die Integration nutzt den Range-Endpoint der TimeTree-API, der **alle Instanzen** wiederkehrender Termine liefert. Geburtstage und Jahrestage werden dadurch korrekt im Kalender angezeigt.
+
+**Cache-Fenster**: 14 Tage zurück + konfigurierbares Vorschaufenster (Standard: 60 Tage).
 
 ---
 
@@ -73,7 +79,7 @@ Wenn ein neuer Name zum ersten Mal in einem Termin auftaucht (z.B. bei einem Neu
 ```yaml
 service: calendar.create_event
 target:
-  entity_id: calendar.familienkalender_mama   # Mitglieder-Kalender
+  entity_id: calendar.timetree_enhanced_familienkalender_mama
 data:
   summary: "Zahnarzt"           # Wird auto zu "Mama: Zahnarzt" in TimeTree
   description: "Bitte nüchtern kommen"
@@ -82,7 +88,22 @@ data:
   location: "Praxis Dr. Müller"
 ```
 
-Der Mitgliedsname wird automatisch als Präfix hinzugefügt, sodass der Termin nach dem nächsten Sync korrekt erkannt wird.
+---
+
+## Kalender-Entity Attribute
+
+| Attribut | Beschreibung |
+|---|---|
+| `next_event_summary` | Titel des nächsten Termins |
+| `next_event_time` | Uhrzeit (`10:30`) oder `Ganztags` |
+| `next_event_date` | Datum (`15.03.2025`) |
+| `next_event_start` | ISO-Timestamp Start |
+| `next_event_end` | ISO-Timestamp Ende |
+| `next_event_all_day` | `true`/`false` |
+| `next_event_location` | Ort |
+| `next_event_description` | Beschreibung |
+| `member` | Mitgliedsname (nur Mitglieder-Entities) |
+| `color_hint` | Farbe für Custom Cards (nur Mitglieder-Entities) |
 
 ---
 
@@ -90,9 +111,9 @@ Der Mitgliedsname wird automatisch als Präfix hinzugefügt, sodass der Termin n
 
 | Sensor | Beschreibung |
 |---|---|
-| `sensor.familienkalender_zuletzt_synchronisiert` | Zeitstempel des letzten erfolgreichen Syncs |
-| `sensor.familienkalender_mama_anzahl` | Anzahl bevorstehender Termine für Mama |
-| `sensor.familienkalender_papa_anzahl` | Anzahl bevorstehender Termine für Papa |
+| `sensor.timetree_enhanced_familienkalender_zuletzt_synchronisiert` | Zeitstempel des letzten Syncs |
+| `sensor.timetree_enhanced_familienkalender_mama_anzahl` | Anzahl bevorstehender Termine für Mama |
+| `sensor.timetree_enhanced_familienkalender_papa_anzahl` | Anzahl bevorstehender Termine für Papa |
 
 ---
 
@@ -103,14 +124,14 @@ Der Mitgliedsname wird automatisch als Präfix hinzugefügt, sodass der Termin n
 logger:
   default: info
   logs:
-    custom_components.timetree_pro: debug
+    custom_components.timetree_enhanced: debug
 ```
 
 ---
 
 ## Bekannte Einschränkungen
 
-- **Nur Upcoming-Events**: Die Integration holt Termine für das konfigurierte Vorschaufenster (Standard: 60 Tage). Vergangene Termine sind im Kalender-Dashboard nicht sichtbar.
+- **Cache-Fenster**: Nur Termine der letzten 14 Tage bis zum konfigurierten Vorschauzeitraum sind im Cache.
 - **Cloud-Polling**: Benötigt Internetverbindung. Kein Webhook-Support (TimeTree-API-Limitierung).
 - **Interne API**: Basiert auf dem reverse-engineerten APP-API – kann bei TimeTree-Updates brechen.
 

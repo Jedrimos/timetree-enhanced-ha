@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "TimeTree Pro – Anmeldung",
+        "title": "TimeTree Enhanced – Anmeldung",
         "description": "Bitte gib deine TimeTree-Zugangsdaten ein.",
         "data": {
           "email": "E-Mail-Adresse",
@@ -11,7 +11,7 @@
       },
       "calendar": {
         "title": "Kalender auswählen",
-        "description": "{calendar_count} Kalender gefunden. Wähle den Familienkalender aus.",
+        "description": "{calendar_count} Kalender gefunden. Wähle den gewünschten Kalender aus.",
         "data": {
           "calendar_id": "Kalender",
           "timezone": "Zeitzone",
@@ -33,7 +33,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "TimeTree Pro – Einstellungen",
+        "title": "TimeTree Enhanced – Einstellungen",
         "data": {
           "scan_interval": "Sync-Intervall (Minuten)",
           "fetch_days": "Vorschauzeitraum (Tage)"
