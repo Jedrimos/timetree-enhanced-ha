@@ -151,40 +151,67 @@ class TimeTreeAPI:
     async def get_calendar_members(self, calendar_id: str) -> list[dict[str, Any]]:
         """Return members of a shared calendar with their label info.
 
-        Tries /calendars/{id}/members, then /calendars/{id} as fallback.
-        Each returned dict has 'name' and 'label_name' keys.
+        Tries several API paths. Logs the raw response at DEBUG level so
+        users can report the exact format if all paths fail.
+        Each returned dict has 'name', 'label_name', and 'color' keys.
         """
-        for path in (f"calendars/{calendar_id}/members", f"calendars/{calendar_id}"):
+        paths = [
+            f"calendars/{calendar_id}/members",
+            f"calendars/{calendar_id}",
+            "calendars",  # find this calendar inside the full list
+        ]
+        for path in paths:
             try:
                 data = await self._get(path)
-            except TimeTreeAPIError:
+            except TimeTreeAPIError as err:
+                _LOGGER.debug("TimeTree Enhanced: members path /%s failed: %s", path, err)
                 continue
 
+            _LOGGER.debug(
+                "TimeTree Enhanced: members API /%s → keys=%s  snippet=%.300s",
+                path,
+                list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                str(data)[:300],
+            )
+
+            # When we fetched the full calendars list, locate this calendar
+            if path == "calendars":
+                cal_list = data.get("calendars") or data.get("data") or (data if isinstance(data, list) else [])
+                data = next(
+                    (c for c in cal_list if str(c.get("id", "")) == calendar_id),
+                    {},
+                )
+
+            # Probe every common key that could hold the member list
             cal = data.get("calendar") or data.get("data") or data
             members_raw = (
                 data.get("members")
+                or data.get("users")
                 or (cal.get("members") if isinstance(cal, dict) else None)
+                or (cal.get("users") if isinstance(cal, dict) else None)
                 or []
             )
 
             if not members_raw:
+                _LOGGER.debug("TimeTree Enhanced: no members key in /%s response", path)
                 continue
 
             result: list[dict[str, Any]] = []
             for m in members_raw:
                 attrs = m.get("attributes") or m
-                name = (attrs.get("name") or attrs.get("display_name") or "").strip()
+                name = (
+                    attrs.get("name")
+                    or attrs.get("display_name")
+                    or attrs.get("username")
+                    or ""
+                ).strip()
                 label = attrs.get("label") or {}
-                label_name = (
-                    (label.get("name") or "").strip()
-                    if isinstance(label, dict)
-                    else ""
-                )
-                color = (
-                    (label.get("color") or label.get("color_name") or "").strip()
-                    if isinstance(label, dict)
-                    else ""
-                )
+                if isinstance(label, dict):
+                    label_name = (label.get("name") or "").strip()
+                    color = (label.get("color") or label.get("color_name") or "").strip()
+                else:
+                    label_name = ""
+                    color = ""
                 if name:
                     result.append({
                         "name": name,
@@ -193,12 +220,16 @@ class TimeTreeAPI:
                     })
 
             if result:
-                _LOGGER.debug(
-                    "TimeTree Enhanced: found %d members via %s: %s", len(result), path, result
+                _LOGGER.info(
+                    "TimeTree Enhanced: found %d members via /%s: %s",
+                    len(result), path, [m["name"] for m in result],
                 )
                 return result
 
-        _LOGGER.debug("TimeTree Enhanced: no member list found for calendar %s", calendar_id)
+        _LOGGER.warning(
+            "TimeTree Enhanced: could not find calendar members – "
+            "enable DEBUG logging for custom_components.timetree_enhanced to diagnose"
+        )
         return []
 
     async def get_upcoming_events(

@@ -134,13 +134,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     members: list[dict] = []
     try:
         members = await api.get_calendar_members(calendar_id)
-        _LOGGER.info(
-            "TimeTree Enhanced: %d calendar members found: %s",
-            len(members),
-            [m["name"] for m in members],
-        )
     except Exception:
-        _LOGGER.debug("TimeTree Enhanced: could not fetch calendar members")
+        _LOGGER.debug("TimeTree Enhanced: member fetch raised an exception")
+
+    # Fallback: if the API didn't return member info, derive members from
+    # the unique labels found in the current events window.
+    if not members and coordinator.data:
+        members = _members_from_event_labels(coordinator.data)
+        if members:
+            _LOGGER.info(
+                "TimeTree Enhanced: derived %d members from event labels "
+                "(API had no member data): %s",
+                len(members),
+                [m["name"] for m in members],
+            )
 
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
@@ -167,6 +174,39 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+_CATEGORY_LABEL_KEYWORDS = {
+    "geburtstag", "birthday", "urlaub", "vacation", "feiertag", "holiday",
+    "arbeit", "work", "job", "bank", "schule", "school", "arzt", "doctor",
+    "sport", "einkauf", "shopping", "termin", "appointment",
+    "ebay", "amazon", "müll", "garbage", "sonstiges", "sonstige", "misc",
+}
+
+
+def _members_from_event_labels(events: list[dict]) -> list[dict]:
+    """Derive a member list from the unique label names seen in events.
+
+    Skips labels that look like categories (known keywords) rather than
+    person names. Each returned dict has 'name', 'label_name', 'color'.
+    """
+    seen: dict[str, dict] = {}
+    for ev in events:
+        label = ev.get("label") or {}
+        if not isinstance(label, dict):
+            continue
+        name = (label.get("name") or "").strip()
+        if not name:
+            continue
+        if name.lower() in _CATEGORY_LABEL_KEYWORDS:
+            continue
+        # Skip labels with spaces that look like sentences (category phrases)
+        if len(name.split()) > 2:
+            continue
+        if name not in seen:
+            color = (label.get("color") or label.get("color_name") or "").strip()
+            seen[name] = {"name": name, "label_name": name, "color": color}
+    return sorted(seen.values(), key=lambda m: m["name"])
 
 
 def _filter_events_in_range(
