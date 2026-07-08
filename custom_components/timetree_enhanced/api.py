@@ -226,25 +226,22 @@ class TimeTreeAPI:
     async def get_all_events_sync(self, calendar_id: str) -> list[dict[str, Any]]:
         """Fetch ALL events (incl. recurring) via the sync endpoint with chunking."""
         events: list[dict[str, Any]] = []
-        since: int | None = None
+        since: int = 0  # always send since=0 on first call — required by the API
         max_chunks = 20
 
         for _ in range(max_chunks):
-            params: dict = {}
-            if since is not None:
-                params["since"] = since
-
             data = await self._get(
                 f"calendar/{calendar_id}/events/sync",
-                params=params or None,
+                params={"since": since},
             )
             events.extend(data.get("events") or [])
 
             if not data.get("chunk"):
                 break
-            since = data.get("since")
-            if not since:
+            next_since = data.get("since")
+            if not next_since:
                 break
+            since = next_since
 
         return events
 
@@ -313,6 +310,12 @@ class TimeTreeAPI:
                     _LOGGER.debug(
                         "TimeTree Enhanced: GET /%s HTTP %s — %.500s", path, resp.status, body
                     )
+                    # HTTP 400 with code -493 means the session is invalid/expired
+                    # (TimeTree returns 400 instead of 401 in some cases)
+                    if resp.status == 400 and isinstance(body, dict):
+                        err_code = (body.get("error") or {}).get("code")
+                        if err_code == -493:
+                            raise TimeTreeAuthError("Session expired (code -493)")
                     raise TimeTreeAPIError(
                         f"GET /{path} returned HTTP {resp.status}: {str(body)[:200]}"
                     )
