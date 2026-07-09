@@ -1,7 +1,7 @@
 {
   "domain": "timetree_enhanced",
   "name": "TimeTree Enhanced",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "codeowners": ["@Jedrimos"],
   "config_flow": true,
   "documentation": "https://github.com/jedrimos/timetree-enhanced-ha",
