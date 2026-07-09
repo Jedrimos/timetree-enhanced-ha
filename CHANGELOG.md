@@ -6,6 +6,15 @@ Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [1.0.1] – 2026-07-09
+
+### Bugfixes
+
+- **HTTP 400 auf Sync-Endpoint** — TimeTree verlangt seit Juli 2026 den `since=0`-Parameter beim ersten Aufruf zwingend; wurde vorher weggelassen und führte zum kompletten Ausfall der Integration
+- **Code -493 als Auth-Fehler erkannt** — HTTP 400 mit Fehlercode -493 wird jetzt korrekt als abgelaufene Session behandelt und löst automatischen Re-Login aus statt die Integration dauerhaft zu stoppen
+
+---
+
 ## [1.0.0] – 2026-05-22
 
 Erster stabiler Release. 🎉
