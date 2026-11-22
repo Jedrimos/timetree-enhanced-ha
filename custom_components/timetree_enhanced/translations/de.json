@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "TimeTree Enhanced – Anmeldung",
-        "description": "Bitte gib deine TimeTree-Zugangsdaten ein.",
+        "description": "Gib die E-Mail-Adresse und das Passwort deines TimeTree-Accounts ein.",
         "data": {
           "email": "E-Mail-Adresse",
           "password": "Passwort"
@@ -17,17 +17,33 @@
           "timezone": "Zeitzone",
           "fetch_days": "Vorschauzeitraum (Tage)",
           "scan_interval": "Sync-Intervall (Minuten)"
+        },
+        "data_description": {
+          "timezone": "Ersatz-Zeitzone für wiederkehrende Termine ohne eigene Zeitzone.",
+          "fetch_days": "Wie viele Tage im Voraus Termine geladen werden.",
+          "scan_interval": "Wie oft TimeTree abgefragt wird. Sehr kurze Intervalle können zu Rate-Limiting durch TimeTree führen."
+        }
+      },
+      "reauth_confirm": {
+        "title": "TimeTree erneut anmelden",
+        "description": "TimeTree hat die gespeicherten Zugangsdaten für „{calendar}“ abgelehnt. Bitte melde dich erneut an.",
+        "data": {
+          "email": "E-Mail-Adresse",
+          "password": "Passwort"
         }
       }
     },
     "error": {
       "invalid_auth": "E-Mail oder Passwort ist falsch.",
       "cannot_connect": "Verbindung zu TimeTree fehlgeschlagen. Internetverbindung prüfen.",
+      "rate_limited": "TimeTree blockiert vorübergehend Anmeldungen. Bitte in ein paar Minuten erneut versuchen.",
       "no_calendars": "Keine Kalender gefunden. Prüfe deinen TimeTree-Account.",
+      "calendar_not_found": "Dieser Account hat keinen Zugriff auf den eingerichteten Kalender.",
       "unknown": "Unbekannter Fehler. Bitte Logs prüfen."
     },
     "abort": {
-      "already_configured": "Dieser Kalender ist bereits eingerichtet."
+      "already_configured": "Dieser Kalender ist bereits eingerichtet.",
+      "reauth_successful": "Erneute Anmeldung erfolgreich."
     }
   },
   "options": {
@@ -37,7 +53,27 @@
         "data": {
           "scan_interval": "Sync-Intervall (Minuten)",
           "fetch_days": "Vorschauzeitraum (Tage)"
+        },
+        "data_description": {
+          "scan_interval": "Wie oft TimeTree abgefragt wird. Sehr kurze Intervalle können zu Rate-Limiting durch TimeTree führen.",
+          "fetch_days": "Wie viele Tage im Voraus Termine geladen werden."
         }
+      }
+    }
+  },
+  "entity": {
+    "calendar": {
+      "all": {
+        "name": "Alle"
+      }
+    },
+    "sensor": {
+      "last_sync": {
+        "name": "Zuletzt synchronisiert"
+      },
+      "event_count": {
+        "name": "{member} (Anzahl)",
+        "unit_of_measurement": "Termine"
       }
     }
   }

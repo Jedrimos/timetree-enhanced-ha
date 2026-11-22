@@ -1,21 +1,86 @@
-name: HACS Validation
+name: Validate
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  validate:
-    name: Validate
+  hacs:
+    name: HACS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: HACS Action
-        uses: hacs/action@main
+      - uses: hacs/action@main
         with:
           category: integration
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  tests:
+    name: Lint & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+      - name: Install dependencies
+        run: pip install -r requirements_test.txt ruff
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Pytest
+        run: pytest -q
+
+  version:
+    name: Version bump & changelog
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check version
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          MANIFEST=custom_components/timetree_enhanced/manifest.json
+          NEW=$(jq -r .version "$MANIFEST")
+          OLD=$(git show "origin/${BASE_REF}:${MANIFEST}" | jq -r .version)
+          echo "base: $OLD  →  PR: $NEW"
+
+          if ! grep -qE "^## \[${NEW//./\\.}\]" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md has no section '## [${NEW}]'"
+            exit 1
+          fi
+
+          if git diff --quiet "origin/${BASE_REF}...HEAD" -- custom_components/; then
+            echo "No integration code changed – no version bump required."
+            exit 0
+          fi
+
+          if [ "$NEW" = "$OLD" ]; then
+            echo "::error file=${MANIFEST}::Integration code changed but the version is still ${OLD}. Bump \"version\" in manifest.json (and add a CHANGELOG entry) so merging creates a release."
+            exit 1
+          fi
+
+          if [ "$(printf '%s\n%s\n' "$OLD" "$NEW" | sort -V | tail -n1)" != "$NEW" ]; then
+            echo "::error file=${MANIFEST}::New version ${NEW} must be greater than ${OLD}"
+            exit 1
+          fi
