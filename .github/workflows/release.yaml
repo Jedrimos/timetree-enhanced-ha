@@ -1,0 +1,110 @@
+name: Release
+
+# Every push to main (i.e. every merged PR) checks the version in manifest.json.
+# If no tag "v<version>" exists yet, a GitHub release is created with:
+#   • tag v<version> on the merged commit
+#   • release notes taken from the matching CHANGELOG.md section
+#   • timetree_enhanced.zip (used by HACS via "zip_release" in hacs.json)
+on:
+  push:
+    branches: [main]
+    paths:
+      - "custom_components/**"
+      - "CHANGELOG.md"
+      - "hacs.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r .version custom_components/timetree_enhanced/manifest.json)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::manifest.json version '$VERSION' is not semver"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists – nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.version.outputs.exists == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+
+      - name: Run tests before releasing
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          pip install -r requirements_test.txt
+          pytest -q
+
+      - name: Build release notes
+        if: steps.version.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found && /^---[[:space:]]*$/ { next }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ] || ! grep -q '[^[:space:]]' RELEASE_NOTES.md; then
+            echo "::warning::No CHANGELOG.md section for $VERSION – using a generic note"
+            echo "Release $VERSION" > RELEASE_NOTES.md
+          fi
+          {
+            echo ""
+            echo "---"
+            echo "**Installation:** HACS → search \"TimeTree Enhanced\", or download \`timetree_enhanced.zip\` and extract it to \`/config/custom_components/timetree_enhanced/\`."
+          } >> RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: Build zip
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          cd custom_components/timetree_enhanced
+          zip -r -X "$GITHUB_WORKSPACE/timetree_enhanced.zip" . -x '*__pycache__*' -x '*.pyc'
+          unzip -l "$GITHUB_WORKSPACE/timetree_enhanced.zip"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          PRERELEASE=""
+          if [[ "$VERSION" == *-* ]]; then PRERELEASE="--prerelease"; fi
+          gh release create "$TAG" timetree_enhanced.zip \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file RELEASE_NOTES.md \
+            $PRERELEASE

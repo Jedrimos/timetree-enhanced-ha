@@ -12,24 +12,37 @@ CONF_FETCH_DAYS = "fetch_days"
 
 DEFAULT_SCAN_INTERVAL = 60
 DEFAULT_FETCH_DAYS = 60
-DEFAULT_TIMEZONE = "Europe/Berlin"
-
-DISPLAY_SEPARATOR = " · "
 
 DEFAULT_LABEL_NAMES = {
-    "label 1", "label 2", "label 3", "label 4",
-    "label 5", "label 6", "label 7",
-    "none", "kein", "keine", "–", "-",
+    "label 1",
+    "label 2",
+    "label 3",
+    "label 4",
+    "label 5",
+    "label 6",
+    "label 7",
+    "label 8",
+    "label 9",
+    "label 10",
+    "none",
+    "kein",
+    "keine",
+    "–",
+    "-",
 }
-
-NO_MEMBER = "Sonstige"
 
 MEMBER_COLORS = [
-    "red", "pink", "purple", "indigo", "blue",
-    "cyan", "teal", "green", "yellow", "amber",
-    "orange", "deep-orange", "brown",
+    "red",
+    "pink",
+    "purple",
+    "indigo",
+    "blue",
+    "cyan",
+    "teal",
+    "green",
+    "yellow",
+    "amber",
+    "orange",
+    "deep-orange",
+    "brown",
 ]
-
-HOLIDAY_LABEL_KEYWORDS = {
-    "feiertag", "holiday", "public holiday", "gesetzlicher feiertag"
-}

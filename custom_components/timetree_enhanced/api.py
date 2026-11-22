@@ -1,345 +1,339 @@
-"""Async TimeTree APP-API wrapper (session-based, no developer token needed)."""
+"""Async wrapper around the internal TimeTree web API (session based).
+
+TimeTree's official developer API was shut down in 2023, so this integration
+talks to the same endpoints the TimeTree web app uses. No developer token is
+needed; the user signs in with e-mail and password.
+"""
+
 from __future__ import annotations
 
-import json
+from datetime import UTC, date, datetime, timedelta
 import logging
-import uuid
-from datetime import datetime, timezone
+import re
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import uuid
 
 import aiohttp
+from yarl import URL
+
+from .events import color_to_str
 
 _LOGGER = logging.getLogger(__name__)
 
-BASE_URL = "https://timetreeapp.com/api/v1"
+WEB_URL = "https://timetreeapp.com"
+BASE_URL = f"{WEB_URL}/api/v1"
+SESSION_COOKIE = "_session_id"
 
-# Headers that mimic the TimeTree web app — Origin is required by the server
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+# Headers that mimic the TimeTree web app — Origin is required by the server.
 _SESSION_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "X-Timetreea": "web/2.1.0/en",
-    "Origin": "https://timetreeapp.com",
+    "Origin": WEB_URL,
 }
 
-_LOGIN_HEADERS = {
-    **_SESSION_HEADERS,
-    "Content-Type": "application/json",
-    "Referer": "https://timetreeapp.com/signin",
-}
+_CSRF_META_RE = re.compile(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', re.I)
+
+# TimeTree error codes seen in practice
+ERR_CSRF_REJECTED = -1
+ERR_SESSION_REJECTED = -493
+ERR_RATE_LIMITED = -495
+ERR_INVALID_CREDENTIALS = -702
+
+# Upper bound for sync pagination (each chunk holds a few hundred events).
+MAX_SYNC_CHUNKS = 100
 
 
-class TimeTreeAuthError(Exception):
-    """Authentication failed."""
+class TimeTreeError(Exception):
+    """Base class for TimeTree errors."""
 
 
-class TimeTreeAPIError(Exception):
-    """General API error."""
+class TimeTreeAuthError(TimeTreeError):
+    """Authentication failed or the session expired."""
 
 
-def _ts_to_dt(ms: int | float, tz_name: str = "UTC") -> datetime:
-    """Convert a Unix millisecond timestamp to a timezone-aware datetime."""
-    try:
-        tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
-        tz = timezone.utc
-    # Values > 1e10 are in milliseconds, smaller ones are seconds
-    secs = ms / 1000 if ms > 1e10 else ms
-    return datetime.fromtimestamp(secs, tz=tz)
+class TimeTreeInvalidCredentials(TimeTreeAuthError):
+    """The e-mail/password combination was rejected."""
+
+
+class TimeTreeAPIError(TimeTreeError):
+    """General API / network error."""
+
+
+class TimeTreeRateLimited(TimeTreeAPIError):
+    """TimeTree rate-limited the request."""
+
+
+def _error_code(body: Any) -> int | None:
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            code = err.get("code")
+            if isinstance(code, int):
+                return code
+        code = body.get("code")
+        if isinstance(code, int):
+            return code
+    return None
 
 
 class TimeTreeAPI:
-    """Minimal async wrapper around the TimeTree internal APP API."""
+    """Minimal async client for the internal TimeTree web API."""
 
-    def __init__(self) -> None:
-        # Dedicated session with unsafe cookie jar so _session_id is stored
-        # and sent automatically — no manual Cookie header management needed.
-        self._session = aiohttp.ClientSession(
+    def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
+        # A dedicated session with an unsafe cookie jar is used so the
+        # _session_id cookie is stored and sent automatically.
+        self._owns_session = session is None
+        self._session = session or aiohttp.ClientSession(
             cookie_jar=aiohttp.CookieJar(unsafe=True),
             headers=_SESSION_HEADERS,
+            timeout=REQUEST_TIMEOUT,
         )
+        self._csrf_token: str | None = None
 
     async def close(self) -> None:
-        await self._session.close()
+        """Close the underlying HTTP session (only if we created it)."""
+        if self._owns_session and not self._session.closed:
+            await self._session.close()
+
+    # ------------------------------------------------------------------
+    # Session handling
+    # ------------------------------------------------------------------
+
+    @property
+    def session_id(self) -> str | None:
+        """Return the current session cookie value, if any."""
+        cookie = self._session.cookie_jar.filter_cookies(URL(BASE_URL)).get(SESSION_COOKIE)
+        return cookie.value if cookie else None
 
     @property
     def is_authenticated(self) -> bool:
-        cookies = self._session.cookie_jar.filter_cookies(BASE_URL)
-        return "_session_id" in cookies
+        return self.session_id is not None
+
+    def restore_session(self, session_id: str) -> None:
+        """Re-use a session cookie persisted from a previous run."""
+        self._session.cookie_jar.update_cookies(
+            {SESSION_COOKIE: session_id}, response_url=URL(BASE_URL)
+        )
 
     def invalidate_session(self) -> None:
         self._session.cookie_jar.clear()
+        self._csrf_token = None
 
     async def login(self, email: str, password: str) -> None:
-        """Obtain a session_id. Raises TimeTreeAuthError on failure."""
-        device_uuid = uuid.uuid4().hex
+        """Sign in and obtain a session cookie."""
+        self.invalidate_session()
         try:
             async with self._session.put(
                 f"{BASE_URL}/auth/email/signin",
-                headers=_LOGIN_HEADERS,
-                json={"uid": email, "password": password, "uuid": device_uuid},
+                headers={"Content-Type": "application/json", "Referer": f"{WEB_URL}/signin"},
+                json={"uid": email, "password": password, "uuid": uuid.uuid4().hex},
             ) as resp:
                 try:
                     data = await resp.json(content_type=None)
-                except Exception:
+                except (aiohttp.ContentTypeError, ValueError):
                     data = {}
-                body_preview = str(data)[:300]
-
-                _LOGGER.debug(
-                    "TimeTree Enhanced: login HTTP %s — %s", resp.status, body_preview
-                )
-
+                code = _error_code(data)
+                _LOGGER.debug("TimeTree Enhanced: login HTTP %s (error code %s)", resp.status, code)
+                if resp.status in (401, 403) or code == ERR_INVALID_CREDENTIALS:
+                    raise TimeTreeInvalidCredentials("Invalid e-mail or password")
+                if resp.status == 429 or code == ERR_RATE_LIMITED:
+                    raise TimeTreeRateLimited("Login rate-limited by TimeTree")
                 if resp.status != 200:
-                    code = (data.get("error") or {}).get("code")
-                    if code == -702:
-                        raise TimeTreeAuthError("Invalid email or password")
-                    if code == -495:
-                        raise TimeTreeAPIError(
-                            f"Login returned HTTP {resp.status} (rate limited): {body_preview}"
-                        )
-                    raise TimeTreeAPIError(
-                        f"Login returned HTTP {resp.status}: {body_preview}"
-                    )
-
-        except aiohttp.ClientError as err:
+                    raise TimeTreeAPIError(f"Login returned HTTP {resp.status} (code {code})")
+        except (TimeoutError, aiohttp.ClientError) as err:
             raise TimeTreeAPIError(f"Network error during login: {err}") from err
 
         if not self.is_authenticated:
-            raise TimeTreeAuthError("No session_id in login response")
-
+            raise TimeTreeAuthError("No session cookie in login response")
         _LOGGER.debug("TimeTree Enhanced: login successful")
 
-    async def get_calendars(self) -> list[dict[str, Any]]:
-        """Return list of calendars the user has access to."""
-        data = await self._get("calendars", params={"since": 0})
-        _LOGGER.debug(
-            "TimeTree Enhanced: get_calendars keys: %s  snippet: %.300s",
-            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-            str(data)[:300],
-        )
+    async def _fetch_csrf_token(self) -> str:
+        """Fetch the CSRF token the web app embeds in its HTML (needed for writes)."""
+        try:
+            async with self._session.get(WEB_URL, headers={"Accept": "text/html"}) as resp:
+                html = await resp.text()
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TimeTreeAPIError(f"Network error fetching CSRF token: {err}") from err
+        match = _CSRF_META_RE.search(html)
+        if not match:
+            raise TimeTreeAPIError("Could not find CSRF token on timetreeapp.com")
+        self._csrf_token = match.group(1)
+        return self._csrf_token
 
-        raw = data.get("calendars") or data.get("data") or (data if isinstance(data, list) else [])
-        calendars = []
+    # ------------------------------------------------------------------
+    # Low-level request
+    # ------------------------------------------------------------------
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        csrf: bool = False,
+        _retry_csrf: bool = True,
+    ) -> dict[str, Any]:
+        headers: dict[str, str] = {}
+        if json is not None:
+            headers["Content-Type"] = "application/json"
+        if csrf:
+            headers["X-CSRF-Token"] = self._csrf_token or await self._fetch_csrf_token()
+
+        try:
+            async with self._session.request(
+                method, f"{BASE_URL}/{path}", params=params, json=json, headers=headers
+            ) as resp:
+                if new_token := resp.headers.get("x-csrf-token"):
+                    self._csrf_token = new_token
+                if 200 <= resp.status < 300:
+                    if resp.status == 204:
+                        return {}
+                    data = await resp.json(content_type=None)
+                    return data if isinstance(data, dict) else {"data": data}
+
+                try:
+                    body: Any = await resp.json(content_type=None)
+                except (aiohttp.ContentTypeError, ValueError):
+                    body = await resp.text()
+                code = _error_code(body)
+                _LOGGER.debug(
+                    "TimeTree Enhanced: %s /%s HTTP %s — %.300s",
+                    method,
+                    path,
+                    resp.status,
+                    body,
+                )
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TimeTreeAPIError(f"Network error on {method} /{path}: {err}") from err
+
+        if resp.status == 401 or code == ERR_SESSION_REJECTED:
+            raise TimeTreeAuthError(f"Session expired (HTTP {resp.status}, code {code})")
+        if csrf and _retry_csrf and (resp.status in (403, 422) or code == ERR_CSRF_REJECTED):
+            # Stale CSRF token → fetch a fresh one and retry once.
+            self._csrf_token = None
+            return await self._request(
+                method, path, params=params, json=json, csrf=True, _retry_csrf=False
+            )
+        if resp.status == 429 or code == ERR_RATE_LIMITED:
+            raise TimeTreeRateLimited(f"{method} /{path} rate-limited by TimeTree")
+        raise TimeTreeAPIError(f"{method} /{path} returned HTTP {resp.status}: {str(body)[:200]}")
+
+    # ------------------------------------------------------------------
+    # Endpoints
+    # ------------------------------------------------------------------
+
+    async def get_calendars(self) -> list[dict[str, str]]:
+        """Return the calendars the user has access to as ``[{id, name}]``."""
+        data = await self._request("GET", "calendars", params={"since": 0})
+        raw = data.get("calendars") or data.get("data") or []
+        calendars: list[dict[str, str]] = []
         for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if item.get("deactivated_at"):
+                continue
             attrs = item.get("attributes") or item
-            cal_id = str(item.get("id", ""))
-            cal_name = attrs.get("name", cal_id)
+            cal_id = str(item.get("id") or "")
             if cal_id:
-                calendars.append({"id": cal_id, "name": cal_name})
-
-        _LOGGER.debug("TimeTree Enhanced: found %d calendars: %s", len(calendars), calendars)
+                calendars.append({"id": cal_id, "name": str(attrs.get("name") or cal_id)})
+        _LOGGER.debug("TimeTree Enhanced: found %d calendars", len(calendars))
         return calendars
 
-    async def get_calendar_members(self, calendar_id: str) -> list[dict[str, Any]]:
-        """Return members of a shared calendar with their label info."""
-        paths = [
-            f"calendars/{calendar_id}/members",
-            f"calendars/{calendar_id}/users",
-            f"calendars/{calendar_id}",
-        ]
-        for path in paths:
-            try:
-                data = await self._get(path, params={"since": 0})
-            except TimeTreeAPIError as err:
-                _LOGGER.debug("TimeTree Enhanced: members path /%s failed: %s", path, err)
-                continue
-
-            # Always log the full response at INFO level so we can see the structure
-            _LOGGER.info(
-                "TimeTree Enhanced: members /%s → keys=%s  full=%.800s",
-                path,
-                list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-                str(data)[:800],
-            )
-
-            cal = data.get("calendar") or data.get("data") or data
-            members_raw = (
-                data.get("members")
-                or data.get("users")
-                or (cal.get("members") if isinstance(cal, dict) else None)
-                or (cal.get("users") if isinstance(cal, dict) else None)
-                or []
-            )
-
-            if not members_raw:
-                continue
-
-            result: list[dict[str, Any]] = []
-            for m in members_raw:
-                attrs = m.get("attributes") or m
-                name = (
-                    attrs.get("name")
-                    or attrs.get("display_name")
-                    or attrs.get("username")
-                    or ""
-                ).strip()
-                label = attrs.get("label") or {}
-                if isinstance(label, dict):
-                    label_name = (label.get("name") or "").strip()
-                    color_val = label.get("color") or label.get("color_name") or ""
-                    if isinstance(color_val, int):
-                        color = f"#{color_val:06x}"
-                    else:
-                        color = str(color_val).strip()
-                else:
-                    label_name = ""
-                    color = ""
-                if name:
-                    result.append({
-                        "name": name,
-                        "label_name": label_name or name,
-                        "color": color,
-                    })
-
-            if result:
-                _LOGGER.info(
-                    "TimeTree Enhanced: found %d members via /%s: %s",
-                    len(result), path, [m["name"] for m in result],
-                )
-                return result
-
-        _LOGGER.info("TimeTree Enhanced: no member data found via API — using label fallback")
-        return []
-
     async def get_calendar_labels(self, calendar_id: str) -> list[dict[str, Any]]:
-        """Return labels defined for a calendar with name, id and hex color."""
-        data = await self._get(f"calendar/{calendar_id}/labels")
-        raw = data.get("calendar_labels") or []
+        """Return the labels of a calendar as ``[{id, name, color}]``."""
+        data = await self._request("GET", f"calendar/{calendar_id}/labels")
         result: list[dict[str, Any]] = []
-        for lbl in raw:
+        for lbl in data.get("calendar_labels") or []:
+            if not isinstance(lbl, dict):
+                continue
             attrs = lbl.get("attributes") or lbl
-            name = (attrs.get("name") or "").strip()
-            color_val = attrs.get("color") or attrs.get("color_name") or ""
-            if isinstance(color_val, int):
-                color = f"#{color_val:06x}"
-            else:
-                color = str(color_val).strip()
-            label_id = lbl.get("id") or attrs.get("id")
-            if name:
-                result.append({"id": label_id, "name": name, "color": color})
-        _LOGGER.debug(
-            "TimeTree Enhanced: get_calendar_labels → %d labels: %s",
-            len(result),
-            [l["name"] for l in result],
-        )
+            name = str(attrs.get("name") or "").strip()
+            if not name:
+                continue
+            result.append(
+                {
+                    "id": lbl.get("id", attrs.get("id")),
+                    "name": name,
+                    "color": color_to_str(attrs.get("color") or attrs.get("color_name")),
+                }
+            )
         return result
 
     async def get_all_events_sync(self, calendar_id: str) -> list[dict[str, Any]]:
-        """Fetch ALL events (incl. recurring) via the sync endpoint with chunking."""
+        """Fetch all events (incl. recurring series) via the paginated sync endpoint."""
         events: list[dict[str, Any]] = []
-        since: int = 0  # always send since=0 on first call — required by the API
-        max_chunks = 20
-
-        for _ in range(max_chunks):
-            data = await self._get(
-                f"calendar/{calendar_id}/events/sync",
-                params={"since": since},
+        since: int = 0  # since=0 is mandatory on the first call
+        for _ in range(MAX_SYNC_CHUNKS):
+            data = await self._request(
+                "GET", f"calendar/{calendar_id}/events/sync", params={"since": since}
             )
-            events.extend(data.get("events") or [])
-
-            if not data.get("chunk"):
-                break
+            events.extend(e for e in data.get("events") or [] if isinstance(e, dict))
             next_since = data.get("since")
-            if not next_since:
-                break
+            if not data.get("chunk") or not next_since or next_since == since:
+                return events
             since = next_since
-
-        return events
-
-    async def get_upcoming_events(
-        self,
-        calendar_id: str,
-        *,
-        days: int = 60,
-        tz: str = "Europe/Berlin",
-    ) -> list[dict[str, Any]]:
-        """Return upcoming events via the internal API."""
-        data = await self._get(
-            f"calendars/{calendar_id}/upcoming_events",
-            params={"timezone": tz, "days": days},
+        _LOGGER.warning(
+            "TimeTree Enhanced: calendar %s has more than %d sync chunks — "
+            "some events may be missing",
+            calendar_id,
+            MAX_SYNC_CHUNKS,
         )
-        return data.get("events", [])
+        return events
 
     async def create_event(
         self,
         calendar_id: str,
         title: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | date,
+        end: datetime | date,
         *,
         all_day: bool = False,
+        tz_name: str = "UTC",
         description: str = "",
         location: str = "",
         label_id: int | None = None,
     ) -> dict[str, Any]:
-        """Create an event in TimeTree. Returns the created event dict."""
+        """Create an event.
 
-        def _fmt_dt(dt: datetime) -> int:
-            """Return Unix milliseconds."""
-            return int(dt.astimezone(timezone.utc).timestamp() * 1000)
-
-        def _fmt_date(dt: datetime) -> str:
-            return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        ``start``/``end`` use Home Assistant semantics: for all-day events they
+        are dates with an *exclusive* end; TimeTree expects midnight-UTC
+        timestamps with an *inclusive* end, so the end is shifted back a day.
+        """
+        if all_day:
+            start_d = start.date() if isinstance(start, datetime) else start
+            end_d = end.date() if isinstance(end, datetime) else end
+            last_day = max(start_d, end_d - timedelta(days=1))
+            start_ms = _date_to_ms(start_d)
+            end_ms = _date_to_ms(last_day)
+            tz_name = "UTC"
+        else:
+            assert isinstance(start, datetime) and isinstance(end, datetime)
+            start_ms = int(start.timestamp() * 1000)
+            end_ms = int(end.timestamp() * 1000)
 
         payload: dict[str, Any] = {
             "title": title,
             "all_day": all_day,
-            "start_at": _fmt_date(start) if all_day else _fmt_dt(start),
-            "end_at": _fmt_date(end) if all_day else _fmt_dt(end),
+            "start_at": start_ms,
+            "start_timezone": tz_name,
+            "end_at": end_ms,
+            "end_timezone": tz_name,
+            "category": 1,
             "note": description,
             "location": location,
-            "uuid": uuid.uuid4().hex,
+            "attendees": [],
+            "recurrences": [],
+            "alerts": [],
+            "file_uuids": [],
         }
         if label_id is not None:
             payload["label_id"] = label_id
 
-        return await self._post(f"calendars/{calendar_id}/events", payload)
+        return await self._request("POST", f"calendar/{calendar_id}/event", json=payload, csrf=True)
 
-    async def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
-        try:
-            async with self._session.get(
-                f"{BASE_URL}/{path}",
-                params=params,
-            ) as resp:
-                if resp.status == 401:
-                    raise TimeTreeAuthError("Session expired")
-                if resp.status != 200:
-                    try:
-                        body = await resp.json(content_type=None)
-                    except Exception:
-                        body = await resp.text()
-                    _LOGGER.debug(
-                        "TimeTree Enhanced: GET /%s HTTP %s — %.500s", path, resp.status, body
-                    )
-                    # HTTP 400 with code -493 means the session is invalid/expired
-                    # (TimeTree returns 400 instead of 401 in some cases)
-                    if resp.status == 400 and isinstance(body, dict):
-                        err_code = (body.get("error") or {}).get("code")
-                        if err_code == -493:
-                            raise TimeTreeAuthError("Session expired (code -493)")
-                    raise TimeTreeAPIError(
-                        f"GET /{path} returned HTTP {resp.status}: {str(body)[:200]}"
-                    )
-                return await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            raise TimeTreeAPIError(f"Network error: {err}") from err
 
-    async def _post(self, path: str, payload: dict) -> dict[str, Any]:
-        try:
-            async with self._session.post(
-                f"{BASE_URL}/{path}",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status == 401:
-                    raise TimeTreeAuthError("Session expired")
-                if resp.status not in (200, 201):
-                    try:
-                        body = await resp.json(content_type=None)
-                    except Exception:
-                        body = await resp.text()
-                    raise TimeTreeAPIError(
-                        f"POST /{path} returned HTTP {resp.status}: {str(body)[:200]}"
-                    )
-                return await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            raise TimeTreeAPIError(f"Network error: {err}") from err
+def _date_to_ms(day: date) -> int:
+    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)

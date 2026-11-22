@@ -2,32 +2,48 @@
   "config": {
     "step": {
       "user": {
-        "title": "TimeTree Enhanced – Sign In",
-        "description": "Enter your TimeTree credentials.",
+        "title": "TimeTree Enhanced – Sign in",
+        "description": "Enter the e-mail address and password of your TimeTree account.",
         "data": {
-          "email": "E-Mail",
+          "email": "E-mail",
           "password": "Password"
         }
       },
       "calendar": {
-        "title": "Select Calendar",
+        "title": "Select calendar",
         "description": "Found {calendar_count} calendar(s). Choose the one to sync.",
         "data": {
           "calendar_id": "Calendar",
-          "timezone": "Time Zone",
+          "timezone": "Time zone",
           "fetch_days": "Fetch window (days)",
           "scan_interval": "Sync interval (minutes)"
+        },
+        "data_description": {
+          "timezone": "Fallback time zone for recurring events that have no time zone of their own.",
+          "fetch_days": "How many days ahead events are loaded.",
+          "scan_interval": "How often TimeTree is polled. Short intervals may trigger TimeTree rate limiting."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate TimeTree",
+        "description": "TimeTree rejected the stored credentials for \"{calendar}\". Please sign in again.",
+        "data": {
+          "email": "E-mail",
+          "password": "Password"
         }
       }
     },
     "error": {
       "invalid_auth": "Invalid e-mail or password.",
-      "cannot_connect": "Could not connect to TimeTree. Check internet connection.",
+      "cannot_connect": "Could not connect to TimeTree. Check your internet connection.",
+      "rate_limited": "TimeTree is rate limiting sign-ins. Wait a few minutes and try again.",
       "no_calendars": "No calendars found for this account.",
+      "calendar_not_found": "This account has no access to the configured calendar.",
       "unknown": "Unexpected error. Check the logs."
     },
     "abort": {
-      "already_configured": "This calendar is already configured."
+      "already_configured": "This calendar is already configured.",
+      "reauth_successful": "Re-authentication was successful."
     }
   },
   "options": {
@@ -37,7 +53,27 @@
         "data": {
           "scan_interval": "Sync interval (minutes)",
           "fetch_days": "Fetch window (days)"
+        },
+        "data_description": {
+          "scan_interval": "How often TimeTree is polled. Short intervals may trigger TimeTree rate limiting.",
+          "fetch_days": "How many days ahead events are loaded."
         }
+      }
+    }
+  },
+  "entity": {
+    "calendar": {
+      "all": {
+        "name": "All"
+      }
+    },
+    "sensor": {
+      "last_sync": {
+        "name": "Last synchronized"
+      },
+      "event_count": {
+        "name": "{member} (count)",
+        "unit_of_measurement": "events"
       }
     }
   }

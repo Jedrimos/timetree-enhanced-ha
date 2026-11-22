@@ -6,6 +6,46 @@ Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [1.1.0] – 2026-11-22
+
+### Bugfixes
+
+- **Termine erstellen funktionierte nicht** — die Kalender meldeten das Feature `CREATE_EVENT` nicht an, `calendar.create_event` wurde von Home Assistant abgelehnt. Außerdem ging der Request an einen falschen Endpoint (`calendars/{id}/events`) ohne CSRF-Token. Jetzt: korrekter Endpoint `calendar/{id}/event`, CSRF-Token, automatischer Re-Login bei abgelaufener Session
+- **Ganztags-Termine beim Erstellen einen Tag zu lang** — HA liefert ein exklusives Enddatum, TimeTree erwartet ein inklusives
+- **Optionen-Dialog („Konfigurieren") stürzte ab** — der Options-Flow wurde mit einem Argument erzeugt, das `OptionsFlow` nicht akzeptiert
+- **Wiederkehrende Termine um 1 Stunde verschoben nach Sommer-/Winterzeit-Wechsel** — Serien werden jetzt in der Zeitzone des Termins expandiert
+- **Gelöschte Einzeltermine einer Serie wurden trotzdem angezeigt** — `EXDATE` wird jetzt ausgewertet
+- **Serien mit mehreren Wochentagen** (z.B. Mo/Mi/Fr) erschienen nur an einem Tag — volle RRULE-Unterstützung (`BYDAY`, `BYMONTHDAY`, `BYSETPOS`, …) über `python-dateutil`
+- **`next_event_time` / `next_event_date` zeigten UTC statt Ortszeit**
+- **Kein Request-Timeout** — hängende Verbindungen blockierten das Update bis zu 5 Minuten; jetzt 30 s
+- **Doppelter API-Abruf beim Start** durch `update_before_add`
+- **Große Kalender abgeschnitten** — Sync-Pagination von 20 auf 100 Chunks erhöht, mit Warnung im Log
+
+### Neu
+
+- **Re-Authentifizierung** — bei geändertem TimeTree-Passwort erscheint eine Reparatur-Meldung statt endloser Fehler
+- **Diagnose-Download** (Zugangsdaten und Termintexte werden geschwärzt)
+- **Geräte-Eintrag** pro Kalender, alle Entities darunter gruppiert
+- **Übersetzte Entity-Namen** (Deutsch/Englisch)
+- **Brand-Icon** direkt in der Integration (HA ≥ 2026.3)
+- Vorschauzeitraum jetzt bis 365 Tage, Sync-Intervall bis 240 Minuten
+- Zeitzone wird bei der Einrichtung mit der HA-Zeitzone vorbelegt
+- Termine aus Serien erhalten eine `recurrence_id`
+
+### Technisch
+
+- Neuer `DataUpdateCoordinator` mit zentralem Login/Re-Login, Session-Cookie bleibt über Neustarts erhalten und wird beim Entfernen der Integration gelöscht
+- Nicht funktionierende Mitglieder-Endpoints entfernt (3 unnötige Requests pro Start)
+- Toter Code (`helpers.py`) entfernt
+- Tests (pytest), Ruff, hassfest- und HACS-Validierung in CI; automatischer Release beim Merge auf `main`
+- Mindestversion Home Assistant: **2024.12**
+
+### Hinweis zum Update
+
+Entity-IDs bleiben unverändert. Die Anzeigenamen werden jetzt aus Geräte- und Entity-Namen gebildet (z.B. „Familie Alle" statt „Familie – Alle").
+
+---
+
 ## [1.0.1] – 2026-07-09
 
 ### Bugfixes
